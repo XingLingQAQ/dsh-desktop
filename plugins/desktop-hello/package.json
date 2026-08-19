@@ -1,0 +1,14 @@
+{
+  "name": "desktop-hello",
+  "version": "0.0.1",
+  "private": true,
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "exports": {
+    "./client": "./client.js"
+  }
+}

@@ -1,0 +1,4 @@
+corner report 2026-08-15T20:32:53.8354548+08:00
+dev started pid=3724
+app pid=14136
+splash found: hwnd=3016708 iconic=False rect=784,529-1264,959 title='DeepSeek Harness'

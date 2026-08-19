@@ -1,0 +1,25 @@
+[package]
+name = "dsh-desktop"
+version = "0.1.0"
+description = "DeepSeek Harness desktop launcher"
+edition = "2021"
+
+[lib]
+name = "dsh_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["unstable", "tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
