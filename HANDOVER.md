@@ -119,8 +119,8 @@ DSH Desktop 是把 **DeepSeek Harness（DSH）** 包装成桌面应用的启动�
 | M2 | 环境检测（五项探针）+ host 进程管理 + 附着/启动 | ✅ 已完成 |
 | M2.5 | 真实自动安装（node / pnpm / dsh，演练验证通过） | ✅ 已完成 |
 | 主题桥 | DSH 主题 → 壳动态联动（浅色/深色实时切换验证通过） | ✅ 已完成 |
-| M3 | 注入代理层（`__DSH_BOOT__` / `__ModuleLoader__` 接管 + 热更新） | 🔄 进行中（代码已接入，待实机验证） |
-| M4 | 前后端插件热插拔 + 会话级隔离 | ✅ 已完成（前端热插拔 + 后端 overlay 热重载 + session observer/过滤） |
+| M3 | 注入代理层（`__DSH_BOOT__` / `__ModuleLoader__` / `__DSH_MODULES__` 接管） | ✅ 已完成（真机 CDP 验证通过） |
+| M4 | 前后端插件热插拔 + 会话级隔离 | ✅ 已完成（新增/改代码/删除三条路径免刷新，真机验证；后端 overlay 热重载 + session observer/过滤） |
 | M5 | 设置 / 托盘 / 诊断导出 | ✅ 已完成（设置面板、关闭到托盘、开机自启、诊断导出） |
 | M6 | 打包（NSIS `.exe` 安装包） | ✅ 已完成（`DSH Desktop_0.1.0_x64-setup.exe`） |
 
@@ -208,7 +208,10 @@ node scripts\make-icon.mjs && npx tauri icon app-icon.png
 
 ## 7. 待办 / 下一步路线
 
-- [x] **M3 注入代理层**：`__DSH_BOOT__` / `__ModuleLoader__` 接管 + 热更新（代码已接入：插件桥 `/plugins/state`、bundle 服务、代理注入、目录轮询；待实机验证）。
+- [x] **M3 注入代理层**：接管 `__DSH_BOOT__` / `__ModuleLoader__` / `__DSH_MODULES__`。
+  注入脚本只管 graph row 与变更发布（`window.__DSH_DESKTOP__`）；真正的 cordis
+  fiber 热交换由内建插件 `@dsh-desktop/hmr` 完成（`src-tauri/src/hmr-plugin.js`）。
+  真机 CDP 验证通过：改代码后页面 marker 不变、模块 exports 已换、rev 已更新。
 - [x] **M4 插件热插拔**：
   - 插件像 U 盘一样即插即用：放入目录、无需重启、前端立即多出功能；
   - 改代码保存立刻生效；
@@ -235,7 +238,8 @@ node scripts\make-icon.mjs && npx tauri icon app-icon.png
 1. 先 `npm run tauri dev` 跑通一次，确认启动画面、主界面、主题联动正常；
 2. 阅读 `src-tauri/src/lib.rs` 的启动状态机，理解 `Splash → Main` 的切换；
 3. 熟悉 `discover.rs` / `provision.rs` / `host.rs` 的环境检测与进程管理；
-4. 从 M3 注入代理层开始，为 M4 插件热插拔打基础。
+4. 插件相关改动看两处：`src-tauri/src/plugin-proxy.js`（graph row + 变更发布）
+   与 `src-tauri/src/hmr-plugin.js`（cordis fiber 热交换，头注释写明了顺序约束）。
 
 ---
 
@@ -246,6 +250,23 @@ node scripts\make-icon.mjs && npx tauri icon app-icon.png
 - 已核验当前可构建状态：
   - `npm run build` ✅ 通过（Vite + React + TS 生产构建）
   - `cargo check` ✅ 通过（仅有 3 个非阻塞 warning，可后续清理）
-- 当前完成度：M1 / M2 / M2.5 / 主题桥已完成；M3 注入代理层代码已接入（待实机验证）；M4 / M5 / M6 未开始。
+- 当前完成度：M1 / M2 / M2.5 / 主题桥 / M3 / M4 已完成并真机验证；M5 / M6 代码已接入（本次未复验）。
 - 注意事项已记录：旧版 DSH 客户端不动；本项目可与旧版并存；调试截图/日志暂保留。
-- 下一步：实机跑一次 `npm run tauri dev` 验证 M3 插件热更新，然后进入 M4 前后端插件热插拔 + 会话级隔离。
+
+### 本次 M3/M4 实机验证记录（CDP）
+
+以 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` 启动，
+先手动把 DSH 起在 `17890` 让壳走附着路径，再用 `scripts\cdp-eval.ps1` 探测：
+
+| 场景 | 证据 |
+|---|---|
+| 基线 | `__DSH_DESKTOP__.subscribe` / `desktopSetRow` / `desktopDropRow` 均在；三个内建+样例插件都已 materialize |
+| 改代码 | `desktop-hello` rev `c6ab5303…` → `e6ec250c…`；新 `console.log` 文本出现；`exports` 对象已换 |
+| 新增插件 | 新目录出现后自动 `loader.create()`，插件 `apply` 日志出现 |
+| 删除插件 | 目录删除后从 `entries` 与 `loadCache` 双双消失 |
+| 免刷新 | 全程 `window` 上的 marker 值不变，证明页面从未 reload |
+
+**已知问题（非本次改动引入）**：自启动路径曾出现「启动超时：未在预期时间内就绪」
+（`BOOT_TIMEOUT` = 45s，见 `lib.rs`）。但手动起 DSH 实测冷启动只需 ~5.3s，
+因此不是 DSH 本身慢；怀疑与首次 profile 初始化或 host stdout 管道读取有关，
+需要单独排查。附着路径（17890/3080 已有实例）工作正常。

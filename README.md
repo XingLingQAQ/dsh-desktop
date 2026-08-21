@@ -64,8 +64,31 @@ scripts\verify-theme.ps1    # 主题联动验证（需 CDP 9222）
 - [x] M2 环境检测（五项探针）+ host 进程管理 + 附着/启动
 - [x] M2.5 真实自动安装（node/pnpm/dsh，演练验证通过）
 - [x] 主题桥：DSH 主题 → 壳动态联动（浅色/深色实时切换验证通过）
-- [x] M3 注入代理层（__DSH_BOOT__ / __ModuleLoader__ 接管 + 热更新）— 插件桥/代理/轮询已接入，待实机验证
-
-- [x] M4 前后端插件热插拔 + 会话级隔离（前端热插拔 + 后端 overlay 热重载 + session observer/过滤已接入）
+- [x] M3 注入代理层：接管 `__DSH_BOOT__` / `__ModuleLoader__` / `__DSH_MODULES__`
+      （真机 CDP 验证通过）
+- [x] M4 前后端插件热插拔 + 会话级隔离：新增 / 改代码 / 删除三条路径均免刷新
+      （真机 CDP 验证通过）+ 后端 overlay 热重载 + session observer/过滤
 - [x] M5 设置 / 托盘 / 诊断导出（设置面板、关闭到托盘、开机自启、诊断导出）
 - [x] M6 打包（NSIS `.exe` 安装包）
+
+## 插件系统
+
+```
+plugins/<name>/client.js   前端插件（window.__ModuleLoader__.load + apply(ctx)）
+plugins/<name>/server.js   后端插件（写入 $DSH_HOME/desktop-overlay/cordis.yml）
+```
+
+热更新分成两半，因为注入脚本跑在 cordis 之前、拿不到 loader：
+
+- `plugin-proxy.js`（initialization_script）劫持三个全局钩子、轮询 bridge
+  `/plugins/state`、维护模块图的 graph row，并把 `added` / `rebuilt` / `removed`
+  变更发布到 `window.__DSH_DESKTOP__`；
+- `@dsh-desktop/hmr`（内建 cordis 客户端插件）订阅该变更流，在 cordis 里完成
+  fiber 热交换：`invalidate` → `prefetch` → 摘除 registry 记录 → 排空旧 fiber
+  → 移除该插件的 `<style>` → `entry.refresh()`。
+
+顺序不可颠倒：registry 记录不先摘除，Loader 会把 entry 永久标成 `disabled`；
+`entry.fiber` 不显式删除，`refresh()` 会直接空转。详见 `hmr-plugin.js` 头注释。
+
+调试：`scripts\cdp-eval.ps1 -UrlMatch 17890 -Expression "<js>"`（需 CDP 9222，
+以 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` 启动）。

@@ -7,9 +7,10 @@
 // To see the hot-reload path in action:
 //   1. keep the desktop app running,
 //   2. edit this file (e.g. change the console.log text),
-//   3. the bridge re-hashes the bundle and the proxy calls
-//      `modules.desktopAddEntry` → `invalidate` + `prefetch`,
-//   4. the client runner reloads the plugin without a page refresh.
+//   3. the bridge re-hashes the bundle, so `/plugins/state` reports a new rev,
+//   4. the injected proxy updates the graph row and publishes a `rebuilt`
+//      change, and the built-in `@dsh-desktop/hmr` plugin swaps this plugin's
+//      cordis fiber in place — no page refresh.
 window.__ModuleLoader__.load({
   id: "desktop-hello",
   factory: function (require) {

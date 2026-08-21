@@ -201,14 +201,8 @@ fn handle_connection(
             write_json(&mut stream, &payload);
         } else if let Some(rest) = path.strip_prefix("/plugins/") {
             if let Some(id) = rest.strip_suffix("/client.js") {
-                if id == "@dsh-desktop/session-observer" {
-                    let body = plugins.session_observer_script();
-                    let headers = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = stream.write_all(headers.as_bytes());
-                    let _ = stream.write_all(body.as_bytes());
+                if let Some(body) = plugins.builtin_script(id) {
+                    write_bundle(&mut stream, body.as_bytes(), "text/javascript; charset=utf-8");
                 } else if let Some(client_path) = plugins.client_path(id) {
                     serve_file(&mut stream, &client_path, "text/javascript; charset=utf-8");
                 } else {
@@ -236,26 +230,33 @@ fn handle_connection(
     }
 }
 
+/// Bundles and plugin state must never be cached: the HMR driver reloads a
+/// plugin by re-running its `<script>` URL, and a cached response would
+/// re-register the factory the reload was meant to replace.
+const NO_STORE: &str = "Cache-Control: no-store\r\n";
+
 fn write_json(stream: &mut TcpStream, value: &impl Serialize) {
     let body = serde_json::to_string(value).unwrap_or_else(|_| "{}".into());
     let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n{NO_STORE}Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(headers.as_bytes());
     let _ = stream.write_all(body.as_bytes());
 }
 
+fn write_bundle(stream: &mut TcpStream, body: &[u8], content_type: &str) {
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{NO_STORE}Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(headers.as_bytes());
+    let _ = stream.write_all(body);
+}
+
 fn serve_file(stream: &mut TcpStream, path: &Path, content_type: &str) {
     match std::fs::read(path) {
-        Ok(body) => {
-            let headers = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(headers.as_bytes());
-            let _ = stream.write_all(&body);
-        }
+        Ok(body) => write_bundle(stream, &body, content_type),
         Err(_) => write_not_found(stream),
     }
 }
@@ -339,6 +340,23 @@ mod tests {
         );
         assert!(observer.contains("200 OK"), "observer response: {observer}");
         assert!(observer.contains("session-observer"), "observer body: {observer}");
+
+        // The HMR driver is the second built-in: it must be in the manifest and
+        // servable, and it must declare the loader/modules injections that let
+        // it own the cordis fiber lifecycle.
+        assert!(
+            state.contains("\"id\":\"@dsh-desktop/hmr\""),
+            "state body: {state}"
+        );
+        let hmr = http_get(&addr, "/plugins/@dsh-desktop/hmr/client.js?rev=hmr");
+        assert!(hmr.contains("200 OK"), "hmr response: {hmr}");
+        assert!(hmr.contains("__ModuleLoader__"), "hmr body: {hmr}");
+        assert!(hmr.contains(r#"["loader", "modules"]"#), "hmr body: {hmr}");
+
+        // Bundles are reloaded through the same URL path, so responses must
+        // forbid caching.
+        assert!(hmr.contains("Cache-Control: no-store"), "hmr headers: {hmr}");
+        assert!(bundle.contains("Cache-Control: no-store"), "bundle headers: {bundle}");
 
         let _ = http_post(&addr, "/report/session", r#"{"sessionId":"sess-1"}"#);
         let state2 = http_get(&addr, "/plugins/state");

@@ -820,8 +820,9 @@ pub fn run() {
             let bridge = Arc::new(bridge);
             app.manage(bridge.clone());
 
-            // 插件目录轮询（1s）：新增/删除/改代码都会反映到 `/plugins/state`，
-            // 前端代理层轮询后调用 `desktopAddEntry` / `desktopRemoveEntry` 热更新。
+            // 插件目录轮询（1s）：新增/删除/改代码都会反映到 `/plugins/state`。
+            // 前端代理层据此更新 graph row 并把变更推给 `@dsh-desktop/hmr`
+            // 插件，由它在 cordis 里换 fiber，完成免刷新热更新。
             plugins.clone().start_watcher();
 
             // splash 窗口：不透明 + 圆角区域裁剪（透明渲染在软件合成下不可靠）。

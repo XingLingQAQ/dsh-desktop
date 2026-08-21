@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Built-in desktop plugins, injected into every boot graph in this order.
+const BUILTIN_IDS: [&str; 2] = ["@dsh-desktop/session-observer", "@dsh-desktop/hmr"];
+
 /// One graph row handed to the DSH client module system through the injected
 /// proxy (same wire shape as `WebBootEntry`).
 #[derive(Clone, Serialize)]
@@ -146,24 +149,32 @@ fn read_plugin(root: &Path, dir_name: &str, bridge_base: &str) -> Option<PluginE
     })
 }
 
+/// One built-in desktop plugin, served from the bridge instead of the plugins
+/// directory. The rev is the id's last segment: these bundles are compiled into
+/// the shell and served no-store, so there is nothing to cache-bust against.
+fn builtin_entry(id: &str, bridge_base: &str) -> PluginEntry {
+    let rev = id.rsplit('/').next().unwrap_or(id).to_string();
+    PluginEntry {
+        id: id.to_string(),
+        url: format!("{bridge_base}/plugins/{id}/client.js?rev={rev}"),
+        rev,
+        inject: None,
+        immediately: Some(true),
+        sessions: None,
+    }
+}
+
 /// Scans the plugin root and returns the current state.
 fn scan_state(root: &Path, bridge_base: &str) -> PluginState {
     let mut map = BTreeMap::new();
-    // Built-in session observer: reports the current DSH session id to the
-    // bridge so session-scoped desktop plugins can be applied dynamically.
-    map.insert(
-        "@dsh-desktop/session-observer".to_string(),
-        PluginEntry {
-            id: "@dsh-desktop/session-observer".to_string(),
-            url: format!(
-                "{bridge_base}/plugins/@dsh-desktop/session-observer/client.js?rev=session-observer"
-            ),
-            rev: "session-observer".to_string(),
-            inject: None,
-            immediately: Some(true),
-            sessions: None,
-        },
-    );
+    // The two built-in halves of the desktop plugin system:
+    //   session-observer — reports the current DSH session id to the bridge so
+    //                      session-scoped plugins can be applied dynamically.
+    //   hmr              — owns the cordis fiber lifecycle (add / rebuild /
+    //                      remove desktop plugins without a page reload).
+    for id in BUILTIN_IDS {
+        map.insert(id.to_string(), builtin_entry(id, bridge_base));
+    }
     if let Ok(read_dir) = fs::read_dir(root) {
         for entry in read_dir.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -404,9 +415,21 @@ impl PluginManager {
     }
 
     /// The built-in session observer bundle, with the bridge URL substituted.
-    pub fn session_observer_script(&self) -> String {
+    fn session_observer_script(&self) -> String {
         let base = self.bridge_base.lock().unwrap().clone();
         include_str!("session-observer.js").replace("__BRIDGE__", &base)
+    }
+
+    /// Bundle source for a built-in plugin id, or `None` when the id belongs to
+    /// the plugins directory. Built-ins ship inside the shell binary.
+    pub fn builtin_script(&self, id: &str) -> Option<String> {
+        match id {
+            "@dsh-desktop/session-observer" => Some(self.session_observer_script()),
+            // The HMR driver reads window.__DSH_DESKTOP__, not the bridge, so it
+            // needs no substitution.
+            "@dsh-desktop/hmr" => Some(include_str!("hmr-plugin.js").to_string()),
+            _ => None,
+        }
     }
 
     /// Update the bridge base after the loopback server has bound. Plugin

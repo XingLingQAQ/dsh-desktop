@@ -99,9 +99,12 @@ export function apply(ctx) {
 ## 热更新
 
 - 桌面壳每秒扫描一次本目录；
-- 新增/删除目录会通过 `/plugins/state` 通知前端代理层；
-- 修改 `client.js` 会改变内容哈希，代理层调用模块系统的
-  `invalidate` + `prefetch` 重新加载，不需要刷新页面；
+- 变更通过 `/plugins/state` 发布，注入的代理层负责更新模块图的 graph row，
+  并把 `added` / `rebuilt` / `removed` 变更推送给内置的 `@dsh-desktop/hmr` 插件；
+- `@dsh-desktop/hmr` 在 cordis 里完成真正的热替换：`invalidate` → `prefetch`
+  → 先摘除 registry 记录 → 排空旧 fiber → 移除该插件注入的 `<style>`
+  → `entry.refresh()` 重新实例化，因此改 `client.js` 不需要刷新页面；
+- 新增目录会 `loader.create()` 挂载新插件，删除目录会 `loader.remove()` 卸载；
 - 修改/新增/删除 `server.js` 会重写后端 overlay 并触发 DSH patch 热重载。
 
 ## 环境变量

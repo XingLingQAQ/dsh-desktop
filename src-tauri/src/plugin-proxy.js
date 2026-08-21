@@ -8,13 +8,19 @@
 //   2. __ModuleLoader__ — wraps the client bundle registration sink, letting
 //                      the desktop shell track every client plugin factory.
 //   3. __DSH_MODULES__ — captures the ClientModuleSystem instance and patches
-//                      it with desktopAddEntry/desktopRemoveEntry, enabling
-//                      runtime plugin graph changes without a page reload.
+//                      it with desktopSetRow/desktopDropRow so desktop plugins
+//                      can enter and leave the module graph at runtime.
 //
 // The proxy also polls the desktop bridge's /plugins/state endpoint. The
 // bridge serves plugin bundles and publishes the current desktop plugin
 // manifest; polling is intentionally simple (no SSE dependency) and only runs
 // while the DSH page is alive.
+//
+// Fiber work is deliberately NOT done here: this script runs before cordis
+// exists, so graph rows are all it can reach. Post-boot changes are published
+// on window.__DSH_DESKTOP__ and consumed by the @dsh-desktop/hmr client plugin,
+// which owns the loader entry and fiber lifecycle. Changes raised before that
+// plugin subscribes are buffered, so none are lost during boot.
 (function () {
   var bridge = "__BRIDGE__";
   var initialEntries = __INITIAL_ENTRIES__;
@@ -101,8 +107,10 @@
   function patchModules(value) {
     if (!isObject(value)) return;
     try {
-      if (typeof value.desktopAddEntry !== "function") {
-        value.desktopAddEntry = function (entry) {
+      // Row-only operations. Invalidate/prefetch and the fiber swap belong to
+      // the @dsh-desktop/hmr plugin; doing them here too would race it.
+      if (typeof value.desktopSetRow !== "function") {
+        value.desktopSetRow = function (entry) {
           if (!isObject(entry) || typeof entry.id !== "string") return;
           if (!this.graphRows) this.graphRows = new Map();
           this.graphRows.set(entry.id, {
@@ -110,17 +118,11 @@
             url: entry.url,
             rev: entry.rev
           });
-          // Drop stale materialization; the next prefetch/import reloads.
-          this.invalidate(entry.id);
-          if (typeof this.prefetch === "function") {
-            this.prefetch(entry.id).catch(function () {});
-          }
         };
       }
-      if (typeof value.desktopRemoveEntry !== "function") {
-        value.desktopRemoveEntry = function (id) {
+      if (typeof value.desktopDropRow !== "function") {
+        value.desktopDropRow = function (id) {
           if (typeof id !== "string") return;
-          this.invalidate(id);
           if (this.graphRows) this.graphRows.delete(id);
         };
       }
@@ -128,6 +130,43 @@
       // The module system may be frozen/minified differently; never break boot.
     }
   }
+
+  // -------------------------------------------------------------- change feed
+  var listeners = [];
+  var buffered = [];
+
+  function emit(change) {
+    if (listeners.length === 0) {
+      buffered.push(change);
+      return;
+    }
+    listeners.forEach(function (fn) {
+      try { fn(change); } catch (e) {}
+    });
+  }
+
+  window.__DSH_DESKTOP__ = {
+    // Replays anything raised before the first subscriber, then streams.
+    // Returns an unsubscribe function (cordis effect disposer).
+    subscribe: function (fn) {
+      if (typeof fn !== "function") return function () {};
+      listeners.push(fn);
+      var replay = buffered;
+      buffered = [];
+      replay.forEach(function (change) {
+        try { fn(change); } catch (e) {}
+      });
+      return function () {
+        var at = listeners.indexOf(fn);
+        if (at !== -1) listeners.splice(at, 1);
+      };
+    },
+    entries: function () {
+      var out = [];
+      known.forEach(function (entry) { out.push(entry); });
+      return out;
+    }
+  };
 
   // ------------------------------------------------------------- state polling
   function sessionAllowed(entry, session) {
@@ -139,7 +178,6 @@
   function applyState(state) {
     if (!isObject(state) || !Array.isArray(state.entries)) return;
     var session = (typeof state.currentSession === "string" && state.currentSession) ? state.currentSession : null;
-    var sessionChanged = session !== currentSession;
     currentSession = session;
 
     var next = new Map();
@@ -149,30 +187,32 @@
       }
     });
 
+    // A session switch needs no special case: entries that gained or lost
+    // access differ between `known` and `next`, so the plain diff covers it.
+    var live = bootSeen && modules;
+
     // Removed entries (including session-scoped plugins no longer allowed).
     known.forEach(function (entry, id) {
-      if (!next.has(id)) {
-        known.delete(id);
-        if (bootSeen && modules) {
-          try { modules.desktopRemoveEntry(id); } catch (e) {}
-        }
-      }
+      if (next.has(id)) return;
+      known.delete(id);
+      if (!live) return;
+      try { modules.desktopDropRow(id); } catch (e) {}
+      emit({ type: "removed", id: id });
     });
 
-    // Added or changed entries. On session change, re-add all allowed entries
-    // so the module system picks up the new graph.
+    // New entries, and rebuilds (rev is a content hash of the bundle).
     next.forEach(function (entry, id) {
       var old = known.get(id);
-      if (old === undefined || sessionChanged || old.rev !== entry.rev) {
-        known.set(id, entry);
-        if (bootSeen && modules) {
-          try { modules.desktopAddEntry(entry); } catch (e) {}
-        }
-      }
+      if (old !== undefined && old.rev === entry.rev) return;
+      known.set(id, entry);
+      if (!live) return;
+      // The row must land before the hmr plugin prefetches this id.
+      try { modules.desktopSetRow(entry); } catch (e) {}
+      emit({ type: old === undefined ? "added" : "rebuilt", id: id, entry: entry });
     });
 
-    // If boot has not happened yet, a later __DSH_BOOT__ assignment will merge
-    // the current `known` map through mergeBoot() automatically.
+    // Before boot, a later __DSH_BOOT__ assignment merges `known` through
+    // mergeBoot(), so the very first graph already carries these entries.
   }
 
   function poll() {
