@@ -1,9 +1,10 @@
 # DSH Desktop 项目交接文档
 
-> 交接日期：2026-08-16（本次交接核验）
+> 交接日期：2026-08-16 首次交接；2026-08-21 更新（M3/M4 完成并真机验证）
 > 项目路径：`D:\Project\DS\dsh-desktop`
+> 仓库：https://github.com/XingLingQAQ/dsh-desktop （private）
 > 开发运行：在该目录执行 `npm run tauri dev`
-> 交接状态：接手方已阅读本文档；前端 `npm run build` 通过、Rust `cargo check` 通过
+> 构建状态：前端 `npm run build` ✅ / `cargo check` ✅ 0 error / `cargo test` ✅ 4 passed
 
 ---
 
@@ -43,21 +44,31 @@
 
 ### 0.4 现在做到了什么程度
 
-启动流程、环境检测、自动安装、主题联动、圆角无边框窗口、动画节奏——这些都做好了，能用。
+启动流程、环境检测、自动安装、主题联动、圆角无边框窗口、动画节奏——都做好了，能用。
+
+**插件热插拔也做完了**，而且是真机验证过的：把插件目录丢进 `plugins/`，界面立刻
+多出功能；改插件代码保存，界面立刻跟着变——整个过程页面一次都不刷新。删掉目录，
+功能立刻消失。前端插件和后端插件都支持。插件还能只在指定会话里生效。
+
+设置面板、托盘、开机自启、诊断导出、NSIS 安装包的代码也都在（本次未逐项复验）。
 
 ### 0.5 还差什么（接下来要做的）
 
-- **插件热插拔**：插件像 U 盘一样即插即用——把插件文件放进一个目录，不用重启，
-  前端界面立刻多出功能；改代码保存立刻生效；前后端插件都支持。
-- **插件按会话隔离**：插件可以只在一个会话里生效，不影响其他会话和全局。
-- **设置面板和托盘图标**：可以改配置、开机自启、缩小到托盘。
-- **打包成安装程序**：做一个 `.exe` 安装包，双击安装就能用。
+- **自启动超时要排查**：DSH 服务已经在跑时“附着”一切正常；但由本程序自己去
+  启动 DSH 时，出现过等 45 秒还没就绪而失败。手动实测 DSH 冷启动只要 5 秒多，
+  所以不是 DSH 慢，是我们这边哪里没读到就绪信号。**这是目前唯一影响“双击就能用”
+  主路径的问题**，优先级最高。
+- **M5 / M6 需要复验**：设置面板、托盘、开机自启、诊断导出、安装包的代码都在，
+  但没有逐项实测过，不能保证都好用。
+- 仓库根目录堆着一堆调试截图和日志，可以清理了。
 
 ### 0.6 几句要紧的交代
 
 1. 机器上还开着一个旧版 DSH 客户端，那个别动；新桌面版可与旧版并存。
 2. 程序现在放在 `D:\Project\DS\dsh-desktop` 文件夹里。
 3. 运行方式是在那个文件夹里执行 `npm run tauri dev`（开发模式）。
+4. `git push` 直连 GitHub 会超时，需要带本机代理：
+   `git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push`
 
 ---
 
@@ -136,21 +147,38 @@ Rust 状态机驱动                  子 WebView 全宽加载 DSH Web UI（就�
 
 主题桥：注入脚本（DSH 页面内）→ 本地回环 HTTP 桥 → 壳事件
         → 壳/标题栏/splash 颜色实时跟随 DSH 前端主题（浅色/深色动态切换）
+
+插件桥：plugins/ 目录（1s 轮询，内容哈希做 rev）
+        → bridge `/plugins/state` + `/plugins/<id>/client.js`（no-store）
+        → plugin-proxy.js（劫持三个全局钩子 · 维护 graph row · 发布变更）
+        → window.__DSH_DESKTOP__
+        → @dsh-desktop/hmr 插件（在 cordis 内换 fiber，免刷新生效）
 ```
 
 ### 主要模块
 
 | 模块 | 路径 | 职责 |
 |---|---|---|
-| 壳前端 | `src/` | React + TS：Splash、主窗口标题栏、主题应用 |
-| 后端主逻辑 | `src-tauri/src/lib.rs` | 启动状态机、窗口生命周期、圆角、子 WebView 挂载 |
+| 壳前端 | `src/` | React + TS：Splash、主窗口标题栏、主题应用、托盘菜单 |
+| 后端主逻辑 | `src-tauri/src/lib.rs` | 启动状态机、窗口生命周期、圆角、子 WebView 挂载、注入脚本装配 |
 | 环境检测 | `src-tauri/src/discover.rs` | node / npm / pnpm / dsh / 依赖五项探针 |
 | 自动安装 | `src-tauri/src/provision.rs` | 下载安装缺失的 node / pnpm / dsh |
 | 进程管理 | `src-tauri/src/host.rs` | spawn、就绪行解析、健康检查、进程树清理、附着 |
-| 主题桥 + 插件桥 | `src-tauri/src/bridge.rs` | 回环 HTTP + token，转发 DSH 主题；提供 `/plugins/state` 与插件 bundle 服务 |
-| 插件目录管理 | `src-tauri/src/plugins.rs` | 扫描 `plugins/`、内容哈希、1s 轮询热更新 |
-| 前端插件代理 | `src-tauri/src/plugin-proxy.js` | 注入 DSH 页面，接管 `__DSH_BOOT__` / `__ModuleLoader__` / `__DSH_MODULES__` 并轮询热更新 |
+| 主题桥 + 插件桥 | `src-tauri/src/bridge.rs` | 回环 HTTP + token；转发主题；`/plugins/state` 与 bundle 服务（`no-store`） |
+| 插件目录管理 | `src-tauri/src/plugins.rs` | 扫描 `plugins/`、内容哈希 rev、1s 轮询、后端 overlay 同步 |
+| 设置 / 商店 | `src-tauri/src/settings.rs`、`store.rs` | 配置持久化；插件商店 |
+| 前端插件代理 | `src-tauri/src/plugin-proxy.js` | 注入 DSH 页面：接管三个全局钩子、维护 graph row、发布变更到 `__DSH_DESKTOP__` |
+| 前端热更新驱动 | `src-tauri/src/hmr-plugin.js` | 内建 cordis 插件（`inject: loader/modules`）：在 cordis 内完成 fiber 热交换 |
+| 会话观察脚本 | `src-tauri/src/session-observer.js` | 内建 cordis 插件：上报当前会话 id，驱动会话级插件过滤 |
 | 主题注入脚本 | `src-tauri/src/theme-observer.js` | 注入 DSH 页面，监听主题变化 |
+
+### 为什么热更新要拆成两半
+
+注入脚本（`initialization_script`）跑在 DSH bundle 之前，那时 cordis 还不存在，
+拿不到 `ctx.loader`，因此它只能管模块图的 graph row。真正让插件“换代码就生效”
+必须换掉 cordis fiber，而这只能在一个 cordis 插件内部做——这就是
+`@dsh-desktop/hmr` 存在的原因。两者通过 `window.__DSH_DESKTOP__` 变更流对接，
+HMR 插件订阅之前的变更会被缓冲重放，所以 boot 期间的变更不会丢。
 
 ---
 
@@ -202,23 +230,109 @@ node scripts\make-icon.mjs && npx tauri icon app-icon.png
   NODE_ENV=development npm install --include=dev
   ```
 - crates.io 慢，`$CARGO_HOME\config.toml` 已配置 rsproxy 镜像。
-- 当前目录 **不是 git 仓库**（未发现 `.git`），接手后建议尽快初始化版本管理。
+- 已初始化 git，remote 指向 https://github.com/XingLingQAQ/dsh-desktop （private）。
+  直连 GitHub 会超时，推送需带本机代理（见 §8）。
+
+---
+
+## 6.5 DSH 上游架构要点（改插件前必读）
+
+这一节是读 DSH 源码得到的结论，**本仓库代码里看不出来**，但改插件系统必须知道。
+
+### 实装源码在哪
+
+```
+C:\Users\XingLingQAQ\AppData\Roaming\DeepSeek Harness\harness-versions\<hash>\
+```
+
+这是完整的 pnpm monorepo（`apps/cli`、`apps/web`、`packages/` 约 50 个包），
+带 `src/` TypeScript 源码，比 GitHub 快且就是实际运行的版本。DSH 上游仓库是
+https://github.com/deepseek-ai/deepseek-harness ，一句话概括其架构：
+**"Everything is a Plugin"** —— 用 `@deepseek-ai/cordis` 插件框架组合一切。
+
+### 三个全局钩子是 DSH 官方的，不是我们造的
+
+| 钩子 | 定义位置 | 是什么 |
+|---|---|---|
+| `__DSH_BOOT__` | `packages/client/web/src/boot.tsx:98` | host 注入的 boot 图，`parseBootManifest` 消费 |
+| `__DSH_MODULES__` | `packages/client/web/src/boot.tsx:112` | `ClientModuleSystem` 实例 |
+| `__ModuleLoader__` | `packages/client/modules/src/client/system.ts:88` | bundle 注册 sink |
+
+而 `desktopSetRow` / `desktopDropRow` 是**我们**打给 `ClientModuleSystem` 的补丁。
+
+### 线上格式约定（造插件条目必须严格匹配）
+
+`packages/client/modules/src/client/manifest.ts`：
+
+- 线上形状是 `{ rev: string, entries: WebBootEntry[] }`；
+- 每条 entry 必须有 **字符串** `id` / `url` / `rev`，否则 `parseBootManifest` 直接抛错；
+- `inject` 必须是字符串数组、`immediately` 必须是布尔（可省略）；
+- **多余字段会被忽略**，所以我们额外带的 `sessions` 字段是安全的；
+- URL 约定就是 `/plugins/<id>/client.js?rev=<rev>` —— 和 `plugins.rs` 生成的一致。
+
+`ClientModuleSystem` 的公开 API 只有 `import` / `registerStatic` / `prefetch` /
+`invalidate` 和 `loadCache`；`graphRows` / `factories` 是 TS private（运行时仍可访问）。
+
+### fiber 热交换的顺序约束（写错会静默失败）
+
+参照 DSH 自己的 `packages/client/hmr/src/client/index.ts`：
+
+1. `invalidate(id)` 必须在 `prefetch(id)` **之前** —— factory 还活着时 prefetch 是
+   空操作，且在未删除的注册上重跑 bundle 会抛 duplicate 错；
+2. **先摘 registry 记录**（`entry.ctx.registry.delete(runtime.callback)`）再让旧
+   fiber 的 disposer 触发，否则 Loader 会走 self-dispose 分支，把 entry **永久**
+   标成 `disabled: true`；
+3. `entry.fiber` 必须**显式 delete** —— dispose 不会清它，而 `refresh()` 一看到
+   `this.fiber` 还在就直接 return，热更新静默失效；
+4. 级联不用记账：下游 fiber 按 provider fiber uid 算激活轮次，换掉 provider
+   fiber 会原生重新级联。
+
+Loader 的运行时 API（`vendor/loader/lib/types/config/tree.d.ts`）：
+`create(options)` 新增 entry、`remove(id)` 停止并移除、`resolve(id)`、`entries()`。
+
+### bundle 必须 no-store
+
+DSH 的 `defaultLoadBundle` 用 `<script src=url>` 加载。热更新是重跑同一个 URL 路径，
+响应被缓存就会把要替换掉的旧 factory 又注册一遍——所以 `bridge.rs` 给 bundle 和
+`/plugins/state` 都加了 `Cache-Control: no-store`。
 
 ---
 
 ## 7. 待办 / 下一步路线
 
-- [x] **M3 注入代理层**：接管 `__DSH_BOOT__` / `__ModuleLoader__` / `__DSH_MODULES__`。
-  注入脚本只管 graph row 与变更发布（`window.__DSH_DESKTOP__`）；真正的 cordis
-  fiber 热交换由内建插件 `@dsh-desktop/hmr` 完成（`src-tauri/src/hmr-plugin.js`）。
-  真机 CDP 验证通过：改代码后页面 marker 不变、模块 exports 已换、rev 已更新。
-- [x] **M4 插件热插拔**：
-  - 插件像 U 盘一样即插即用：放入目录、无需重启、前端立即多出功能；
-  - 改代码保存立刻生效；
-  - 前后端插件都支持（前端 `/plugins/state` 轮询 + 后端 overlay 热重载）。
-- [x] **M4 插件按会话隔离**：`dsh.client.sessions` 白名单 + 内置 session observer，切换会话自动增删插件。
-- [x] **M5 设置面板 / 托盘图标 / 诊断导出**：设置面板、开机自启、关闭到托盘、诊断导出均已接入。
-- [x] **M6 打包安装程序**：NSIS `.exe` 安装包已生成，双击安装即可使用。
+M1 – M6 的代码都已接入，以下是**真正还开着的口子**，按优先级排列。
+
+### 7.1 自启动超时（最高优先级）
+
+由本程序自己 spawn DSH 时出现过「启动超时：未在预期时间内就绪」，
+`BOOT_TIMEOUT = 45s`（`lib.rs:47`）。但手动跑同一条命令实测冷启动只要 **~5.3s**：
+
+```sh
+$env:DSH_HOME="C:\Users\XingLingQAQ\.dsh"
+& "<node>" "<dsh-cli>\lib\bin.js" --profile web --port 17890
+# → dsh web: http://127.0.0.1:17890
+```
+
+所以不是 DSH 慢。就绪行格式 `dsh web: http://` 与 `host.rs:93` 的匹配也是对的。
+待查方向：首次 profile 初始化耗时、`host.rs` 对子进程 stdout 的管道读取
+（是否被缓冲/阻塞）、以及 spawn 时的环境变量差异。
+**附着路径（17890/3080 已有实例）工作正常**，可用它绕过来做其他验证。
+
+### 7.2 M5 / M6 复验
+
+设置面板、关闭到托盘、开机自启、诊断导出、NSIS 安装包的代码都在，但均未逐项实测。
+需要真机走一遍，确认 `settings.rs` / `store.rs` / `tray-menu` 的实际行为，
+以及安装包能正常安装运行。
+
+### 7.3 可选改进
+
+- `plugins.rs:start_watcher` 目前是 1s 全量轮询，每次都重读所有 `client.js` 算哈希；
+  插件多了 IO 会涨，可换 `notify` crate 做文件监听（去抖 300–500ms）。
+- 已知竞态（DSH 官方 HMR 也有、并明确接受）：保存发生在 bundle 加载途中时，
+  `invalidate()` 不清 `pendingArrival`，`arrive()` 会复用旧的 pending promise。
+- 清理仓库根目录的调试截图与日志（`m1-*.png`、`max-*.png`、`tauri-dev*.log` 等）。
+- 3 条无害 Rust warning：`discover.rs:151` 多余 `mut`、`lib.rs:602` 无用赋值、
+  `host.rs:127` 死代码。
 
 ---
 
@@ -230,16 +344,28 @@ node scripts\make-icon.mjs && npx tauri icon app-icon.png
 3. **运行方式固定**：`npm run tauri dev`（开发模式）。
 4. 仓库根目录留有大量调试截图/日志（`m1-*.png`、`max-*.png`、`tauri-dev*.log` 等），
    属于过程产物，可后续清理，但当前先保留便于回溯。
+5. **推送需要代理**：git 直连 GitHub 会 `Failed to connect to github.com:443`，
+   而 curl 直连正常。推送时带上本机代理（不改全局 config）：
+   ```sh
+   git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push
+   ```
+6. **调试 DSH 页面用 CDP**：以
+   `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` 启动，
+   再用 `scripts\cdp-eval.ps1 -UrlMatch 17890 -Expression "<js>"` 在页面里求值。
+   （注意：旧的 `scripts\cdp-debug.ps1` 有个 bug——会把 CDP 事件帧误当成命令回复；
+   `cdp-eval.ps1` 已按 request id 匹配修正。）
 
 ---
 
 ## 9. 接手后建议第一步
 
-1. 先 `npm run tauri dev` 跑通一次，确认启动画面、主界面、主题联动正常；
+1. 先 `npm run tauri dev` 跑通一次，确认启动画面、主界面、主题联动正常
+   （若卡在“等待服务就绪”，见 §7.1；可先手动把 DSH 起在 17890 走附着路径）；
 2. 阅读 `src-tauri/src/lib.rs` 的启动状态机，理解 `Splash → Main` 的切换；
 3. 熟悉 `discover.rs` / `provision.rs` / `host.rs` 的环境检测与进程管理；
-4. 插件相关改动看两处：`src-tauri/src/plugin-proxy.js`（graph row + 变更发布）
-   与 `src-tauri/src/hmr-plugin.js`（cordis fiber 热交换，头注释写明了顺序约束）。
+4. 改插件系统前**先读 §6.5**（DSH 上游架构要点），再看两处代码：
+   `src-tauri/src/plugin-proxy.js`（graph row + 变更发布）与
+   `src-tauri/src/hmr-plugin.js`（cordis fiber 热交换，头注释写明了顺序约束）。
 
 ---
 
@@ -249,9 +375,11 @@ node scripts\make-icon.mjs && npx tauri icon app-icon.png
 - 已阅读 `HANDOVER.md`、`README.md`、`package.json`、`src-tauri/tauri.conf.json` 及核心 Rust 模块。
 - 已核验当前可构建状态：
   - `npm run build` ✅ 通过（Vite + React + TS 生产构建）
-  - `cargo check` ✅ 通过（仅有 3 个非阻塞 warning，可后续清理）
-- 当前完成度：M1 / M2 / M2.5 / 主题桥 / M3 / M4 已完成并真机验证；M5 / M6 代码已接入（本次未复验）。
-- 注意事项已记录：旧版 DSH 客户端不动；本项目可与旧版并存；调试截图/日志暂保留。
+  - `cargo check` ✅ 0 error（3 个非阻塞 warning，见 §7.3）
+  - `cargo test` ✅ 4 passed
+  - 三个注入脚本 `node --check` ✅ 语法通过
+- 当前完成度：M1 / M2 / M2.5 / 主题桥 / M3 / M4 已完成并真机验证；M5 / M6 代码已接入（未复验，见 §7.2）。
+- 注意事项已记录：旧版 DSH 客户端不动；本项目可与旧版并存；推送需带代理；调试截图/日志暂保留。
 
 ### 本次 M3/M4 实机验证记录（CDP）
 
@@ -266,7 +394,5 @@ node scripts\make-icon.mjs && npx tauri icon app-icon.png
 | 删除插件 | 目录删除后从 `entries` 与 `loadCache` 双双消失 |
 | 免刷新 | 全程 `window` 上的 marker 值不变，证明页面从未 reload |
 
-**已知问题（非本次改动引入）**：自启动路径曾出现「启动超时：未在预期时间内就绪」
-（`BOOT_TIMEOUT` = 45s，见 `lib.rs`）。但手动起 DSH 实测冷启动只需 ~5.3s，
-因此不是 DSH 本身慢；怀疑与首次 profile 初始化或 host stdout 管道读取有关，
-需要单独排查。附着路径（17890/3080 已有实例）工作正常。
+**已知问题（非本次改动引入）**：自启动路径出现「启动超时：未在预期时间内就绪」，
+详见 §7.1。附着路径（17890/3080 已有实例）工作正常。
