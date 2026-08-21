@@ -613,14 +613,19 @@ fn start_launch(
                     }
                 }
                 Ok(HostEvent::Log(line)) => push_log(&state, line),
+                // A silent poll is the normal case: the host prints nothing at
+                // all until its readiness line (~5s). Only an exited process or
+                // the real deadline below ends the wait — failing here made
+                // BOOT_TIMEOUT dead code and gave up after 500ms.
                 Err(()) => {
                     if let Some(message) = check_exited(&mut process) {
                         fail(&state, &handle, message);
-                    } else {
-                        fail(&state, &handle, "启动超时：未在预期时间内就绪（查看日志）".into());
+                        guard.store(false, Ordering::SeqCst);
+                        return;
                     }
-                    guard.store(false, Ordering::SeqCst);
-                    return;
+                    // The channel also reports Err once both readers hit EOF,
+                    // which returns instantly; don't spin on it.
+                    std::thread::sleep(Duration::from_millis(100));
                 }
             }
             if std::time::Instant::now() >= deadline {
@@ -656,6 +661,7 @@ fn start_launch(
             .rsplit(':')
             .next()
             .and_then(|p| p.parse::<u16>().ok());
+        set_step(&state, &handle, 2, "连接就绪");
         {
             let mut s = state.lock().unwrap();
             s.port = port;
