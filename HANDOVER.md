@@ -57,11 +57,12 @@
 - **自启动超时已修复**（2026-08-21）：之前由本程序自己启动 DSH 时会失败，根因是等
   就绪的循环把「500 毫秒没输出」当成了失败——实际只等了半秒就放弃，而 DSH 要安静
   约 5 秒才打印就绪行。现在自启动路径实测可用，详见 §7.1。
-- **打包版插件目录还指向构建机**：装到别人机器上后插件热插拔和插件商店会失效，
-  详见 §7.2。这是现在最要紧的一个。
+- **打包版插件目录已修复**（2026-08-21）：之前装到别人机器上会指向构建机路径，
+  插件热插拔和商店都失效。现在 release 落到 `%APPDATA%\dsh-desktop`，详见 §7.2。
 - **M5 / M6 已复验**：设置面板、托盘命令、诊断导出、插件商店安装/卸载实测通过；
   NSIS 安装包可构建且含 M3/M4 代码。只剩托盘点击弹菜单需人工确认一次（§7.3）。
-- 仓库根目录堆着一堆调试截图和日志，可以清理了。
+- **还没做的**：打包版 `store/` 内置目录为空（需配 `bundle.resources`，见 §7.2 遗留）；
+  仓库根目录堆着一堆调试截图和日志，可以清理了。
 
 ### 0.6 几句要紧的交代
 
@@ -333,18 +334,38 @@ DSH 在打印就绪行之前会安静 ~4.9 秒（实测），所以第一次 500
 `port: 61317`（`--port 0` 随机端口）、`label: "连接就绪"`、`done: true`、`error: null`，
 日志有「就绪: http://127.0.0.1:61317」；插件三条目正常加载，改插件代码热更新照旧生效。
 
-### 7.2 打包版插件目录指向构建机（M6 已知缺陷，最高优先级）
+### 7.2 打包版插件目录指向构建机（已修复 2026-08-21）
 
-`lib.rs:786` 与 `store.rs:39` 都用 `env!("CARGO_MANIFEST_DIR")` —— **编译期**常量。
-release 二进制里确实烧进了字面量 `D:\Project\DS\dsh-desktop\src-tauri`（grep 可验证）。
+**症状**：`lib.rs` 与 `store.rs` 各自内联了一份插件目录解析，都用
+`env!("CARGO_MANIFEST_DIR")` —— 编译期常量。旧的 release 二进制里确实能 grep 到
+字面量 `D:\Project\DS\dsh-desktop\src-tauri`，即装到别人机器上后插件根目录和插件
+商店都指向构建机的不存在路径，打包版的插件热插拔与商店实际不可用。
 
-后果：**装到别人机器上后，插件根目录和插件商店会指向构建机的
-`D:\Project\DS\dsh-desktop\...`**，该路径在用户机上不存在，于是打包版的插件热插拔
-与插件商店实际不可用，除非用户手动设 `DSH_DESKTOP_PLUGINS_DIR`。
+**修法**：解析逻辑收敛到 `store::data_root()` 一处，并按 `#[cfg]` 拆成两个函数体
+（而不是 `if cfg!(...)` 运行时分支 —— 属性拆分让构建机路径**根本不被编译进** release
+二进制，而不是编进去但走不到，且这一点可 grep 验证）：
 
-`lib.rs:784-785` 的注释表明这是为了让 `npm run tauri dev` 不受 cwd 影响 —— 开发场景
-解决了，打包场景没考虑。建议修法：release 下解析到 `%APPDATA%\dsh-desktop\plugins`
-（或 exe 同级目录），仅 debug 下回退到 manifest 路径。
+| 构建 | 数据根 |
+|---|---|
+| debug | 仓库根（`CARGO_MANIFEST_DIR/..`），`npm run tauri dev` 不受 cwd 影响 |
+| release | `%APPDATA%\dsh-desktop`，与 `settings.json`、诊断报告同处，用户可写 |
+
+`plugins_root` = `DSH_DESKTOP_PLUGINS_DIR` 覆盖，否则 `data_root()/plugins`；
+`store_root` = `data_root()/store`。`lib.rs` 改为直接调 `store::plugins_root()`，
+消掉了两边会漂移的重复定义 —— 插件扫描与插件商店从此保证同一个目录。
+
+**验证**（grep 重新构建的 release 二进制）：
+
+| 检查 | 结果 |
+|---|---|
+| 构建机路径 `D:\Project\DS\dsh-desktop` | **0 处**（修复前 1 处）|
+| `dsh-desktop\src-tauri` | **0 处**（修复前 1 处）|
+| `@dsh-desktop/hmr` 等 M3/M4 代码 | 仍在（5 处）|
+| debug 构建 | 仍指向仓库根：`plugins_root=D:\Project\DS\dsh-desktop\plugins` |
+
+**遗留**：打包版的 `store/` 目录初次安装时是空的（示例目录只存在于仓库里，没有作为
+Tauri resource 打进安装包）。插件商店 UI 会显示空列表而不是报错。要让它带内置目录，
+需在 `tauri.conf.json` 配 `bundle.resources` 并改用 `resource_dir()` 解析。
 
 ### 7.3 托盘点击弹菜单未自动验证
 

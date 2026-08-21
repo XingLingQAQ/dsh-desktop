@@ -17,7 +17,7 @@ mod provision;
 mod settings;
 mod store;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -782,18 +782,10 @@ pub fn run() {
             app.manage(settings_state.clone());
             app.manage(quitting.clone());
 
-            // 桌面插件目录：`DSH_DESKTOP_PLUGINS_DIR` 可覆盖，默认使用项目根下
-            // 的 `plugins/`。插件像 U 盘一样放入该目录即可被扫描。
-            let plugins_root = std::env::var("DSH_DESKTOP_PLUGINS_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    // 开发/构建时以 Cargo manifest 所在目录的上一级（项目根）为基准，
-                    // 保证 `npm run tauri dev` 无论 cwd 在哪都能找到项目根的 plugins/。
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .parent()
-                        .unwrap_or_else(|| Path::new("."))
-                        .join("plugins")
-                });
+            // 桌面插件目录：插件像 U 盘一样放入该目录即可被扫描。解析规则见
+            // `store::plugins_root`（开发用仓库根，打包用 APPDATA）——插件商店
+            // 必须与这里指向同一个目录，所以两边共用同一个函数。
+            let plugins_root = store::plugins_root();
             let plugins = Arc::new(PluginManager::new(plugins_root.clone(), String::new()));
             eprintln!("dsh-desktop: plugins_root={}", plugins_root.display());
 

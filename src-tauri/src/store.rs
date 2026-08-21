@@ -34,22 +34,39 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
-/// Project root (parent of the Cargo manifest dir).
-fn project_root() -> PathBuf {
+/// Root holding the desktop's plugin directories.
+///
+/// Dev builds use the repo root so `npm run tauri dev` finds the checked-in
+/// `plugins/` and `store/` no matter the cwd. `CARGO_MANIFEST_DIR` resolves at
+/// compile time, though — in a packaged build it names the *build machine's*
+/// path, which does not exist on the user's disk. So the two builds get
+/// separate `cfg` bodies rather than a runtime branch: that keeps the build
+/// path out of the shipped binary entirely.
+#[cfg(debug_assertions)]
+fn data_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf()
 }
 
+/// Release: user-writable data, alongside `settings.json`.
+#[cfg(not(debug_assertions))]
+fn data_root() -> PathBuf {
+    std::env::var("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("dsh-desktop")
+}
+
 pub fn store_root() -> PathBuf {
-    project_root().join("store")
+    data_root().join("store")
 }
 
 pub fn plugins_root() -> PathBuf {
     std::env::var("DSH_DESKTOP_PLUGINS_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| project_root().join("plugins"))
+        .unwrap_or_else(|_| data_root().join("plugins"))
 }
 
 fn read_pkg_meta(dir: &Path, id: &str) -> (String, String, String) {
