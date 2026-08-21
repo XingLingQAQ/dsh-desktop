@@ -58,8 +58,9 @@
   启动 DSH 时，出现过等 45 秒还没就绪而失败。手动实测 DSH 冷启动只要 5 秒多，
   所以不是 DSH 慢，是我们这边哪里没读到就绪信号。**这是目前唯一影响“双击就能用”
   主路径的问题**，优先级最高。
-- **M5 / M6 需要复验**：设置面板、托盘、开机自启、诊断导出、安装包的代码都在，
-  但没有逐项实测过，不能保证都好用。
+- **M5 / M6 已复验**：设置面板、托盘命令、诊断导出、插件商店安装/卸载实测通过；
+  NSIS 安装包可构建且含 M3/M4 代码。剩两个口子见 §7.2（打包版插件目录指向构建机）
+  与 §7.3（托盘点击弹菜单需人工确认）。
 - 仓库根目录堆着一堆调试截图和日志，可以清理了。
 
 ### 0.6 几句要紧的交代
@@ -318,13 +319,26 @@ $env:DSH_HOME="C:\Users\XingLingQAQ\.dsh"
 （是否被缓冲/阻塞）、以及 spawn 时的环境变量差异。
 **附着路径（17890/3080 已有实例）工作正常**，可用它绕过来做其他验证。
 
-### 7.2 M5 / M6 复验
+### 7.2 打包版插件目录指向构建机（M6 已知缺陷）
 
-设置面板、关闭到托盘、开机自启、诊断导出、NSIS 安装包的代码都在，但均未逐项实测。
-需要真机走一遍，确认 `settings.rs` / `store.rs` / `tray-menu` 的实际行为，
-以及安装包能正常安装运行。
+`lib.rs:786` 与 `store.rs:39` 都用 `env!("CARGO_MANIFEST_DIR")` —— **编译期**常量。
+release 二进制里确实烧进了字面量 `D:\Project\DS\dsh-desktop\src-tauri`（grep 可验证）。
 
-### 7.3 可选改进
+后果：**装到别人机器上后，插件根目录和插件商店会指向构建机的
+`D:\Project\DS\dsh-desktop\...`**，该路径在用户机上不存在，于是打包版的插件热插拔
+与插件商店实际不可用，除非用户手动设 `DSH_DESKTOP_PLUGINS_DIR`。
+
+`lib.rs:784-785` 的注释表明这是为了让 `npm run tauri dev` 不受 cwd 影响 —— 开发场景
+解决了，打包场景没考虑。建议修法：release 下解析到 `%APPDATA%\dsh-desktop\plugins`
+（或 exe 同级目录），仅 debug 下回退到 manifest 路径。
+
+### 7.3 托盘点击弹菜单未自动验证
+
+`show_tray_menu` 只由托盘图标点击事件触发，CDP 无法模拟托盘点击。它调用的三个命令
+（`show_main_window` / `open_settings` / `quit_app`）本身实测可用，但"点托盘弹出菜单"
+这个交互需要人工点一次确认。
+
+### 7.4 可选改进
 
 - `plugins.rs:start_watcher` 目前是 1s 全量轮询，每次都重读所有 `client.js` 算哈希；
   插件多了 IO 会涨，可换 `notify` crate 做文件监听（去抖 300–500ms）。
@@ -378,7 +392,7 @@ $env:DSH_HOME="C:\Users\XingLingQAQ\.dsh"
   - `cargo check` ✅ 0 error（3 个非阻塞 warning，见 §7.3）
   - `cargo test` ✅ 4 passed
   - 三个注入脚本 `node --check` ✅ 语法通过
-- 当前完成度：M1 / M2 / M2.5 / 主题桥 / M3 / M4 已完成并真机验证；M5 / M6 代码已接入（未复验，见 §7.2）。
+- 当前完成度：M1 – M6 全部完成并复验；剩余口子见 §7（自启动超时、打包版插件目录、托盘点击）。
 - 注意事项已记录：旧版 DSH 客户端不动；本项目可与旧版并存；推送需带代理；调试截图/日志暂保留。
 
 ### 本次 M3/M4 实机验证记录（CDP）
@@ -396,3 +410,28 @@ $env:DSH_HOME="C:\Users\XingLingQAQ\.dsh"
 
 **已知问题（非本次改动引入）**：自启动路径出现「启动超时：未在预期时间内就绪」，
 详见 §7.1。附着路径（17890/3080 已有实例）工作正常。
+
+### 本次 M5/M6 复验记录
+
+M5 全部经 CDP 调 Tauri 命令实测通过（`withGlobalTauri: false`，走
+`__TAURI_INTERNALS__.invoke`）：
+
+| 能力 | 结果 |
+|---|---|
+| `get_settings` / `set_close_to_tray` / `set_workspace_folder` | ✅ 读写并持久化到 `%APPDATA%\dsh-desktop\settings.json` |
+| `export_diagnostics` | ✅ 生成 1645 字节报告（设置、启动状态、日志尾、插件清单、当前会话），无 BOM 的正确 UTF-8 |
+| `get_plugin_store` / `install_store_plugin` | ✅ 安装后 2.5s 内热插到运行中的页面 |
+| `uninstall_plugin` | ✅ 卸载后从页面移除 |
+| `get_installed_plugins` | ✅ `has_client` / `has_server` 判定正确 |
+| `list_directory` | ✅ 目录优先排序 |
+| `get_launch_state` | ✅ step=3 已就绪、`attached: true` |
+| 开机自启 | 只读验证：`reg add/delete/query` 逻辑正确；注册表项全程未写入 |
+
+M6：`npm run tauri build` ✅ 通过（release 编译 6m13s，0 error），产出
+`src-tauri\target\release\bundle\nsis\DSH Desktop_0.1.0_x64-setup.exe`（1.95 MB），
+release exe 8.31 MB / ProductName `DSH Desktop` / FileVersion `0.1.0`。
+grep 二进制确认 M3/M4 代码确实打进去了：`@dsh-desktop/hmr`、`registry.delete`、
+`Cache-Control: no-store`、`__DSH_DESKTOP__` 均在。
+
+**未做**：没有实际安装该 `.exe`（会写系统、不易回滚，需人工决定）。
+配合 §7.2 的路径缺陷，安装后插件功能预计不可用。
