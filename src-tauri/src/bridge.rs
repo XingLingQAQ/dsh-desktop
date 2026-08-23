@@ -80,6 +80,11 @@ where
     let port = listener.local_addr()?.port();
     let token = random_token();
     let expected_path = format!("/report/{token}");
+    // State-changing routes sit behind the token: install and uninstall write to
+    // disk, so a bare loopback path would let any local process — or any page the
+    // content webview wanders onto — drive them.
+    let api_path = format!("/api/{token}");
+    let api_base = format!("http://127.0.0.1:{port}{api_path}");
     let callback: Arc<dyn Fn(ThemeSnapshot) + Send + Sync> = Arc::new(on_report);
     let thread_plugins = plugins.clone();
 
@@ -88,10 +93,12 @@ where
             match stream {
                 Ok(stream) => {
                     let expected = expected_path.clone();
+                    let api = api_path.clone();
+                    let base = api_base.clone();
                     let cb = callback.clone();
                     let plugins = thread_plugins.clone();
                     std::thread::spawn(move || {
-                        handle_connection(stream, &expected, cb.as_ref(), &plugins)
+                        handle_connection(stream, &expected, &api, &base, cb.as_ref(), &plugins)
                     });
                 }
                 Err(_) => continue,
@@ -109,6 +116,8 @@ where
 fn handle_connection(
     mut stream: TcpStream,
     expected_path: &str,
+    api_path: &str,
+    api_base: &str,
     callback: &(dyn Fn(ThemeSnapshot) + Send + Sync),
     plugins: &PluginManager,
 ) {
@@ -188,6 +197,25 @@ fn handle_connection(
         let _ = stream.write_all(
             b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
         );
+    } else if method == "POST" && path == format!("{api_path}/plugins/install") {
+        let value = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
+        let id = value.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+        let tarball = value.get("tarball").and_then(|v| v.as_str()).unwrap_or_default();
+        match crate::registry::install(id, tarball) {
+            // The directory watcher picks the new plugin up on its next pass, so
+            // the response only reports that the files landed.
+            Ok(()) => write_json(&mut stream, &serde_json::json!({ "ok": true })),
+            Err(message) => write_json(&mut stream, &serde_json::json!({ "ok": false, "error": message })),
+        }
+    } else if method == "POST" && path == format!("{api_path}/plugins/uninstall") {
+        let value = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
+        let id = value.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+        match crate::registry::uninstall(id) {
+            Ok(()) => write_json(&mut stream, &serde_json::json!({ "ok": true })),
+            Err(message) => write_json(&mut stream, &serde_json::json!({ "ok": false, "error": message })),
+        }
+    } else if method == "GET" && path == format!("{api_path}/plugins/installed") {
+        write_json(&mut stream, &crate::store::list_installed());
     } else if method == "GET" || method == "HEAD" {
         if path == "/plugins/state" {
             let state_handle = plugins.state();
@@ -202,7 +230,11 @@ fn handle_connection(
         } else if let Some(rest) = path.strip_prefix("/plugins/") {
             if let Some(id) = rest.strip_suffix("/client.js") {
                 if let Some(body) = plugins.builtin_script(id) {
-                    write_bundle(&mut stream, body.as_bytes(), "text/javascript; charset=utf-8");
+                    write_bundle(
+                        &mut stream,
+                        body.replace("__BRIDGE_API__", api_base).as_bytes(),
+                        "text/javascript; charset=utf-8",
+                    );
                 } else if let Some(client_path) = plugins.client_path(id) {
                     serve_file(&mut stream, &client_path, "text/javascript; charset=utf-8");
                 } else {

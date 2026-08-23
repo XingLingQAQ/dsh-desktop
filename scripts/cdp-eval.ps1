@@ -1,11 +1,21 @@
 # One-shot CDP eval helper: run a JS expression in every WebView2 page and print the result.
+#
+# Prefer -File over -Expression: PowerShell 5.1's Get-Content defaults to the
+# system ANSI codepage, so `-Expression (Get-Content probe.js -Raw)` silently
+# corrupts any non-ASCII literal in the probe. -File reads UTF-8 explicitly.
 param(
-    [Parameter(Mandatory = $true)][string]$Expression,
+    [string]$Expression,
+    [string]$File,
     [string]$UrlMatch = "",
     [string]$DebugPort = "9222"
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($File) {
+    $Expression = [System.IO.File]::ReadAllText((Resolve-Path $File), [System.Text.Encoding]::UTF8)
+}
+if (-not $Expression) { throw "pass -Expression or -File" }
 
 function Send-Cdp([System.Net.WebSockets.ClientWebSocket]$ws, [int]$id, [string]$method, $params) {
     $msg = @{ id = $id; method = $method; params = $params } | ConvertTo-Json -Depth 8 -Compress

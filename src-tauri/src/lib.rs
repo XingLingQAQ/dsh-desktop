@@ -14,6 +14,7 @@ mod discover;
 mod host;
 mod plugins;
 mod provision;
+mod registry;
 mod settings;
 mod store;
 
@@ -191,18 +192,6 @@ fn export_diagnostics(
     let path = dir.join(format!("diagnostics-{stamp}.txt"));
     std::fs::write(&path, report).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
-}
-
-/// List plugins available in the built-in store.
-#[tauri::command]
-fn get_plugin_store() -> Vec<store::StorePluginInfo> {
-    store::list_store()
-}
-
-/// Install a plugin from the built-in store into the desktop plugins dir.
-#[tauri::command]
-fn install_store_plugin(id: String) -> Result<(), String> {
-    store::install_store_plugin(&id)
 }
 
 /// List installed plugins (for the Settings > Plugins management page).
@@ -759,8 +748,6 @@ pub fn run() {
             set_auto_start,
             set_workspace_folder,
             export_diagnostics,
-            get_plugin_store,
-            install_store_plugin,
             get_installed_plugins,
             uninstall_plugin,
             list_directory,

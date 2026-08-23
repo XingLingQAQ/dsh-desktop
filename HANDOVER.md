@@ -1,10 +1,11 @@
 # DSH Desktop 项目交接文档
 
-> 交接日期：2026-08-16 首次交接；2026-08-21 更新（M3/M4 完成并真机验证）
+> 交接日期：2026-08-16 首次交接；2026-08-21 更新（M3/M4 完成并真机验证）；2026-08-24 更新（插件商店重做并端到端验证）
 > 项目路径：`D:\Project\DS\dsh-desktop`
 > 仓库：https://github.com/XingLingQAQ/dsh-desktop （private）
+> 插件目录仓库：https://github.com/XingLingQAQ/dsh-plugin-registry （public，CI 刷 catalog.json）
 > 开发运行：在该目录执行 `npm run tauri dev`
-> 构建状态：前端 `npm run build` ✅ / `cargo check` ✅ 0 error / `cargo test` ✅ 4 passed
+> 构建状态：前端 `npm run build` ✅（含 `build:plugins`）/ `cargo check` ✅ 0 error / `cargo test` ✅ 7 passed
 
 ---
 
@@ -52,6 +53,14 @@
 
 设置面板、托盘、开机自启、诊断导出、NSIS 安装包的代码也都在（本次未逐项复验）。
 
+**插件商店也重做了**（2026-08-24）：商店不再是一个单独的壳面板，而是作为
+`设置 → 插件` 里多出来的一条「插件商店」标签页（复用 DSH 自带的
+`settings.plugins.tab` slot），目录来自公开仓库 `dsh-plugin-registry`，由 GitHub
+Action 每天 04:17 UTC 抓 GitHub `dsh-plugin` topic、读每个候选仓库的 `package.json`
+验真、再查 npm 拿到真正可装的 tarball，产出 `catalog.json`。安装走 npm tarball
+（不是 GitHub 源码包——源码包缺 `lib/`/`dist/` 这类 build 产物）。安装/卸载经
+带 token 的 bridge API 落盘，目录监听器 1s 内把新插件热插进运行中的页面。详见 §7.5。
+
 ### 0.5 还差什么（接下来要做的）
 
 - **自启动超时已修复**（2026-08-21）：之前由本程序自己启动 DSH 时会失败，根因是等
@@ -61,8 +70,11 @@
   插件热插拔和商店都失效。现在 release 落到 `%APPDATA%\dsh-desktop`，详见 §7.2。
 - **M5 / M6 已复验**：设置面板、托盘命令、诊断导出、插件商店安装/卸载实测通过；
   NSIS 安装包可构建且含 M3/M4 代码。只剩托盘点击弹菜单需人工确认一次（§7.3）。
-- **还没做的**：打包版 `store/` 内置目录为空（需配 `bundle.resources`，见 §7.2 遗留）；
-  仓库根目录堆着一堆调试截图和日志，可以清理了。
+- **插件商店已重做并端到端验证**（2026-08-24）：目录来自公开 registry 仓库的
+  `catalog.json`（CI 每天刷），安装在 `设置 → 插件 → 插件商店` 标签页里走 npm
+  tarball，安装 4s + 挂载 1s，卸载 1s + 取消挂载，全程不刷新页面。详见 §7.5。
+- **还没做的**：打包版 `store/` 内置目录已不需要（商店改从 registry 拉，本地
+  `store/` 目录随重做一起删除）；仓库根目录堆着一堆调试截图和日志，可以清理了。
 
 ### 0.6 几句要紧的交代
 
@@ -123,6 +135,9 @@ DSH Desktop 是把 **DeepSeek Harness（DSH）** 包装成桌面应用的启动�
 - [x] **圆角无边框窗口**：Windows 下使用 `SetWindowRgn` 圆角裁剪，
   最大化时清除圆角区域避免黑边。
 - [x] **关窗即退出**：关闭主窗口触发程序退出，自己启动的 DSH 服务会被清理。
+- [x] **插件商店**（重做 2026-08-24）：`设置 → 插件 → 插件商店` 标签页，目录来自
+  公开 `dsh-plugin-registry` 仓库的 `catalog.json`（CI 每日刷），从 npm tarball
+  安装，经带 token 的 bridge API 落盘，目录监听热插。端到端真机验证安装/卸载。
 
 ### 里程碑对照
 
@@ -166,9 +181,12 @@ Rust 状态机驱动                  子 WebView 全宽加载 DSH Web UI（就�
 | 环境检测 | `src-tauri/src/discover.rs` | node / npm / pnpm / dsh / 依赖五项探针 |
 | 自动安装 | `src-tauri/src/provision.rs` | 下载安装缺失的 node / pnpm / dsh |
 | 进程管理 | `src-tauri/src/host.rs` | spawn、就绪行解析、健康检查、进程树清理、附着 |
-| 主题桥 + 插件桥 | `src-tauri/src/bridge.rs` | 回环 HTTP + token；转发主题；`/plugins/state` 与 bundle 服务（`no-store`） |
-| 插件目录管理 | `src-tauri/src/plugins.rs` | 扫描 `plugins/`、内容哈希 rev、1s 轮询、后端 overlay 同步 |
-| 设置 / 商店 | `src-tauri/src/settings.rs`、`store.rs` | 配置持久化；插件商店 |
+| 主题桥 + 插件桥 | `src-tauri/src/bridge.rs` | 回环 HTTP + token；转发主题；`/plugins/state` 与 bundle 服务（`no-store`）；带 token 的 `/api/<token>/plugins/{install,uninstall,installed}` |
+| 插件目录管理 | `src-tauri/src/plugins.rs` | 扫描 `plugins/`、内容哈希 rev、1s 轮询、后端 overlay 同步；内建插件 `builtin_script()`（含 store bundle） |
+| 商店安装/卸载 | `src-tauri/src/registry.rs` | 校验 id 与 tarball host、`curl` 下载、`tar --strip-components=1` 解包、staging 原子 rename、卸载 |
+| 本地插件清单 | `src-tauri/src/store.rs` | `plugins_root`、`list_installed`、`uninstall_plugin`、`list_directory`（无本地 catalog —— 目录来自 registry） |
+| 设置持久化 | `src-tauri/src/settings.rs` | 配置读写 |
+| 商店前端插件 | `src-plugins/store/` | 注册 `settings.plugins.tab` id `desktop-store`；`StoreTab` 搜索/过滤/安装；`data.ts` 拉 catalog + 调 bridge；`vite.plugins.config.ts` 打 CJS bundle |
 | 前端插件代理 | `src-tauri/src/plugin-proxy.js` | 注入 DSH 页面：接管三个全局钩子、维护 graph row、发布变更到 `__DSH_DESKTOP__` |
 | 前端热更新驱动 | `src-tauri/src/hmr-plugin.js` | 内建 cordis 插件（`inject: loader/modules`）：在 cordis 内完成 fiber 热交换 |
 | 会话观察脚本 | `src-tauri/src/session-observer.js` | 内建 cordis 插件：上报当前会话 id，驱动会话级插件过滤 |
@@ -193,6 +211,7 @@ HMR 插件订阅之前的变更会被缓冲重放，所以 boot 期间的变更�
 - 自定义标题栏高度：`46px`（Rust 与 CSS 需保持一致）；
 - 圆角半径：`12px`；
 - 桌面插件目录：默认 `plugins/`（当前工作目录下），示例插件在 `plugins/desktop-hello/`。
+- 商店 catalog：`https://raw.githubusercontent.com/XingLingQAQ/dsh-plugin-registry/main/catalog.json`（公开 registry 仓库，CI 每日 04:17 UTC 刷新）。
 
 ### 环境变量
 
@@ -209,13 +228,14 @@ HMR 插件订阅之前的变更会被缓冲重放，所以 boot 期间的变更�
 ```sh
 # 开发模式（推荐）
 cd D:\Project\DS\dsh-desktop
-npm run tauri dev
+npm run tauri dev   # beforeDevCommand 会先跑 build:plugins 再 dev
 
 # 仅前端开发
 npm run dev
 
-# 前端构建
-npm run build
+# 前端构建（含插件 bundle）
+npm run build          # = build:plugins && tsc && vite build
+npm run build:plugins  # 仅打 src-plugins/ → dist-plugins/store.js（CJS，外部化平台词）
 
 # Rust 构建（需在 src-tauri 下）
 cargo build
@@ -351,8 +371,8 @@ DSH 在打印就绪行之前会安静 ~4.9 秒（实测），所以第一次 500
 | release | `%APPDATA%\dsh-desktop`，与 `settings.json`、诊断报告同处，用户可写 |
 
 `plugins_root` = `DSH_DESKTOP_PLUGINS_DIR` 覆盖，否则 `data_root()/plugins`；
-`store_root` = `data_root()/store`。`lib.rs` 改为直接调 `store::plugins_root()`，
-消掉了两边会漂移的重复定义 —— 插件扫描与插件商店从此保证同一个目录。
+`lib.rs` 改为直接调 `store::plugins_root()`，消掉了两边会漂移的重复定义 ——
+插件扫描与插件商店从此保证同一个目录。
 
 **验证**（grep 重新构建的 release 二进制）：
 
@@ -363,9 +383,8 @@ DSH 在打印就绪行之前会安静 ~4.9 秒（实测），所以第一次 500
 | `@dsh-desktop/hmr` 等 M3/M4 代码 | 仍在（5 处）|
 | debug 构建 | 仍指向仓库根：`plugins_root=D:\Project\DS\dsh-desktop\plugins` |
 
-**遗留**：打包版的 `store/` 目录初次安装时是空的（示例目录只存在于仓库里，没有作为
-Tauri resource 打进安装包）。插件商店 UI 会显示空列表而不是报错。要让它带内置目录，
-需在 `tauri.conf.json` 配 `bundle.resources` 并改用 `resource_dir()` 解析。
+（`store_root` 已随 §7.5 的商店重做移除：目录改从 registry 仓库拉，本地不再需要
+`store/` 目录，原先的「打包版内置目录为空」遗留随之消失。）
 
 ### 7.3 托盘点击弹菜单未自动验证
 
@@ -382,6 +401,86 @@ Tauri resource 打进安装包）。插件商店 UI 会显示空列表而不是�
 - 清理仓库根目录的调试截图与日志（`m1-*.png`、`max-*.png`、`tauri-dev*.log` 等）。
 - 3 条无害 Rust warning：`discover.rs:151` 多余 `mut`、`lib.rs:602` 无用赋值、
   `host.rs:127` 死代码。
+
+### 7.5 插件商店重做（2026-08-24 完成，端到端验证）
+
+**为什么重做**：旧的商店是壳自己画的一个独立面板 + 标题栏上的一个按钮，目录来自本地
+`<project>/store/` 的几个示例目录。两个问题：(1) 用户本来就在 `设置 → 插件` 里管理
+插件，再多一个入口割裂；(2) 本地 catalog 不可发现，装到打包版还指向构建机路径（§7.2）。
+重做后：商店是 DSH 自带插件设置里的一条 tab，目录来自公开 registry 仓库的 `catalog.json`。
+
+**目录链路**（`dsh-plugin-registry` 仓库，公开）：
+
+- `scripts/build-catalog.mjs`：搜 GitHub `topic:dsh-plugin`（stars / updated 两种排序各
+  3 页、`per_page=100`，并集去重）→ 每个候选读 `package.json`（raw.githubusercontent，
+  不占 API 额度）→ `toEntry` 要求 `dsh.client` + `exports["./client"]`，或 `dsh.bundle`；
+  两者都没有的（预设/技能/agent team 类仓库）剔除 → 对每个确认插件查
+  `registry.npmjs.org/<name>` 拿 `dist-tags.latest` 的真实 tarball → 输出
+  `catalog.json`，按 stars 降序，`generatedAt` 用 ISO。
+- `.github/workflows/refresh.yml`：`cron: '17 4 * * *'` + `workflow_dispatch` + 脚本/CI
+  变更触发；只在 `catalog.json` 实际变化时才提交；`permissions: contents: write`。
+- `schema.json`：catalog 的 JSON Schema（draft 2020-12）。
+- **为什么从 npm 而不是 GitHub 装**：插件的 `exports["./client"]` 通常是 build 产物
+  （`lib/`、`dist/`），在 `files` 里、发到 npm 但被 gitignore。GitHub 源码 tarball 里
+  没有这个文件，安装后入口缺失、挂载失败。npm tarball 正好就是 `files` 集，已构建好，
+  装的机器无需工具链。`catalog.json` 的 `tarball` 字段保留 codeload 源码地址但标注
+  SOURCE ONLY，`npm.tarball` 才是实际安装源。
+
+**桌面端链路**（本仓库）：
+
+- `src-plugins/store/`（新增，由 `vite.plugins.config.ts` 打成 `dist-plugins/store.js`
+  CJS bundle，外部化 10 个平台词）：
+  - `index.tsx`：cordis 插件 `dsh-desktop-store`，`inject: ['slots']`，注册
+    `settings.plugins.tab` 的 id `desktop-store`、order 30、label `插件商店`。
+    样式在模块顶层注入并打 `data-plugin="@dsh-desktop/store"` 标记 —— DSH 的
+    `claimStyles` 会把未标记的 `<style>` 认成"正在 materialize 的那个插件"的，不在
+    `apply()` 里注入是为了不被别的插件认领、reload 时被一起换掉。
+  - `StoreTab.tsx`：搜索 + 三档过滤（可安装/带界面/已安装）+ 刷新；`RENDER_CAP=60`
+    截断长列表；隐藏不可装条目（除非已装）；meta 行展示
+    `scanned → accepted → installable`；卡片用 `ui-primitives` 的 `Button/Input/Pill`。
+  - `data.ts`：`CATALOG_URL` 指向 registry 仓库；`API_BASE = '__BRIDGE_API__'`（bridge
+    服务 bundle 时替换成带 token 的真实地址）；sessionStorage 6h 缓存；`install()`
+    在 `plugin.npm === null` 时直接抛错，否则 POST `plugin.npm.tarball`。
+- `src-tauri/src/registry.rs`（新增）：`install(id, tarball)` 校验 id（npm 形状段校验，
+  `.`, `..`, `/` 拒绝，`@scope/name` 支持）、校验 tarball host（`registry.npmjs.org/`
+  或 `codeload.github.com/` 前缀）、`curl.exe` 下载、`tar.exe -xzf --strip-components=1`
+  解包到 staging、原子 rename 到目标（跨卷 fallback `copy_tree`）；`uninstall(id)` 删目录
+  并清理空 scope 目录。3 个单测覆盖路径穿越与 host 白名单。
+- `src-tauri/src/bridge.rs`：`start()` 额外构造 `api_path = /api/<token>`、
+  `api_base = http://127.0.0.1:<port>/api/<token>`；新路由 `POST /plugins/install`、
+  `POST /plugins/uninstall`、`GET /plugins/installed`（全在 token 路径下，避免任何本地
+  进程或页面直接驱动写盘）；bundle 服务时把 `__BRIDGE_API__` 替换进 store bundle。
+- `src-tauri/src/plugins.rs`：`BUILTIN_IDS` 加 `@dsh-desktop/store`；`builtin_script`
+  返回 `include_str!("../../dist-plugins/store.js")`。
+- `src-tauri/src/store.rs`：删掉 `StorePluginInfo` / `list_store` / `install_store_plugin`
+  / `store_root`（本地 catalog 不再需要）；保留 `InstalledPluginInfo` / `list_installed`
+  / `uninstall_plugin` / `list_directory` / `plugins_root`。
+- `src-tauri/src/lib.rs`：删 `get_plugin_store` / `install_store_plugin` 命令；保留
+  `get_installed_plugins` / `uninstall_plugin` / `list_directory`。
+- `src/main.tsx` + `src/styles.css`：删标题栏的 `StoreButton`、设置里的 `plugins` tab、
+  相关 store 面板 DOM 与 CSS。商店现在只在 DSH 的插件设置里出现。
+- `package.json`：`build` = `build:plugins && tsc && vite build`，新增 `build:plugins`。
+- `tauri.conf.json`：`beforeDevCommand` = `build:plugins && dev`（dev 也要先打 bundle）。
+- `.gitignore`：新增 `dist-plugins`。
+
+**端到端验证**（CDP，DSH 起在 17890 走附着路径）：
+
+| 场景 | 证据 |
+|---|---|
+| 商店 tab 出现 | `设置 → 插件` 的 tab 列表含「插件商店」 |
+| 搜索安装 | 搜 `dsh-cost-tracker` → 点安装 → 「处理中…」4s 后变「卸载」 |
+| 热挂载 | 安装后 1s 内 `__DSH_DESKTOP__.entries()` 多出 `dsh-cost-tracker` |
+| 卸载 | 点卸载 → 1s 内从 `entries` 消失，卡片变「安装」 |
+| 基线恢复 | 卸载后 entries 回到 4 条（hmr / session-observer / store / desktop-hello） |
+
+测试残留（`store-e2e.js` 等 probe、`host-17890.log`）已清理，未进提交。
+
+**遗留 / 待办**：
+
+- catalog 当前以 npm 是否发布判定 `installable`；只在 GitHub、未发 npm 的插件会被
+  隐藏。可后续给 `dsh.bundle` 已提交构建产物的少数仓库开放 codeload 安装路径。
+- catalog 刷新依赖 GitHub Action cron，topic 下新增插件最多隔一天才进商店；要更
+  及时可在 `refresh.yml` 加 `repository_dispatch`，商店 UI 的刷新按钮再触发。
 
 ---
 
@@ -423,11 +522,11 @@ Tauri resource 打进安装包）。插件商店 UI 会显示空列表而不是�
 - 已确认项目路径 `D:\Project\DS\dsh-desktop`，开发运行命令为 `npm run tauri dev`。
 - 已阅读 `HANDOVER.md`、`README.md`、`package.json`、`src-tauri/tauri.conf.json` 及核心 Rust 模块。
 - 已核验当前可构建状态：
-  - `npm run build` ✅ 通过（Vite + React + TS 生产构建）
-  - `cargo check` ✅ 0 error（3 个非阻塞 warning，见 §7.3）
-  - `cargo test` ✅ 4 passed
+  - `npm run build` ✅ 通过（含 `build:plugins` → `dist-plugins/store.js`，Vite + React + TS 生产构建）
+  - `cargo check` ✅ 0 error（3 个非阻塞 warning，见 §7.4）
+  - `cargo test` ✅ 7 passed（registry 新增 3 个：id 校验、host 白名单、scoped id）
   - 三个注入脚本 `node --check` ✅ 语法通过
-- 当前完成度：M1 – M6 全部完成并复验；剩余口子见 §7（自启动超时、打包版插件目录、托盘点击）。
+- 当前完成度：M1 – M6 全部完成并复验；插件商店重做完成并端到端验证（§7.5）；剩余口子见 §7（托盘点击 §7.3）。
 - 注意事项已记录：旧版 DSH 客户端不动；本项目可与旧版并存；推送需带代理；调试截图/日志暂保留。
 
 ### 本次 M3/M4 实机验证记录（CDP）
@@ -455,7 +554,7 @@ M5 全部经 CDP 调 Tauri 命令实测通过（`withGlobalTauri: false`，走
 |---|---|
 | `get_settings` / `set_close_to_tray` / `set_workspace_folder` | ✅ 读写并持久化到 `%APPDATA%\dsh-desktop\settings.json` |
 | `export_diagnostics` | ✅ 生成 1645 字节报告（设置、启动状态、日志尾、插件清单、当前会话），无 BOM 的正确 UTF-8 |
-| `get_plugin_store` / `install_store_plugin` | ✅ 安装后 2.5s 内热插到运行中的页面 |
+| `get_plugin_store` / `install_store_plugin` | ✅ 安装后 2.5s 内热插到运行中的页面（**已废弃**：商店重做后改走 bridge `/api/<token>/plugins/install`，见 §7.5） |
 | `uninstall_plugin` | ✅ 卸载后从页面移除 |
 | `get_installed_plugins` | ✅ `has_client` / `has_server` 判定正确 |
 | `list_directory` | ✅ 目录优先排序 |
@@ -468,5 +567,10 @@ release exe 8.31 MB / ProductName `DSH Desktop` / FileVersion `0.1.0`。
 grep 二进制确认 M3/M4 代码确实打进去了：`@dsh-desktop/hmr`、`registry.delete`、
 `Cache-Control: no-store`、`__DSH_DESKTOP__` 均在。
 
+> 注：M6 上面这条记录是在商店重做**之前**的；商店重做后应重新跑一次
+> `npm run tauri build` 确认 `@dsh-desktop/store` / `dsh-plugin-registry` /
+> `__BRIDGE_API__` 也进了 release 二进制。本次未重打（耗时 ~6min），接手后可补。
+
 **未做**：没有实际安装该 `.exe`（会写系统、不易回滚，需人工决定）。
-配合 §7.2 的路径缺陷，安装后插件功能预计不可用。
+§7.2 的路径缺陷已修复，商店重做后本地 `store/` 目录也不再需要，安装后插件
+热插拔与商店功能预计可用。

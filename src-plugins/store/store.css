@@ -1,0 +1,138 @@
+.dsx-store {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.dsx-store-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dsx-store-search {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+
+.dsx-store-filters {
+  display: flex;
+  gap: 4px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.08));
+}
+
+.dsx-store-filter {
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-text-secondary, #6b7280);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.dsx-store-filter:hover {
+  color: var(--dsw-alias-text-primary, #111827);
+}
+
+.dsx-store-filter[data-active='true'] {
+  background: var(--dsw-alias-bg-primary, #fff);
+  color: var(--dsw-alias-text-primary, #111827);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.dsx-store-meta {
+  font-size: 11.5px;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dsx-store-list {
+  display: grid;
+  gap: 8px;
+  /* The settings pane scrolls; the list must not add a second scrollbar. */
+  min-height: 0;
+}
+
+.dsx-store-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-primary, transparent);
+}
+
+.dsx-store-card-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.dsx-store-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dsx-store-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-text-primary, #111827);
+  overflow-wrap: anywhere;
+}
+
+.dsx-store-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-text-secondary, #6b7280);
+  overflow-wrap: anywhere;
+}
+
+.dsx-store-facts {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+}
+
+.dsx-store-repo {
+  color: inherit;
+  text-decoration: none;
+}
+
+.dsx-store-repo:hover {
+  text-decoration: underline;
+}
+
+.dsx-store-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dsx-store-empty,
+.dsx-store-error {
+  padding: 28px 12px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+}
+
+.dsx-store-error {
+  color: var(--dsw-alias-text-danger, #dc2626);
+}

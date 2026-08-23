@@ -21,7 +21,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Built-in desktop plugins, injected into every boot graph in this order.
-const BUILTIN_IDS: [&str; 2] = ["@dsh-desktop/session-observer", "@dsh-desktop/hmr"];
+const BUILTIN_IDS: [&str; 3] = [
+    "@dsh-desktop/session-observer",
+    "@dsh-desktop/hmr",
+    "@dsh-desktop/store",
+];
 
 /// One graph row handed to the DSH client module system through the injected
 /// proxy (same wire shape as `WebBootEntry`).
@@ -428,6 +432,9 @@ impl PluginManager {
             // The HMR driver reads window.__DSH_DESKTOP__, not the bridge, so it
             // needs no substitution.
             "@dsh-desktop/hmr" => Some(include_str!("hmr-plugin.js").to_string()),
+            // Built by `npm run build:plugins`; the bridge substitutes
+            // `__BRIDGE_API__` when serving it.
+            "@dsh-desktop/store" => Some(include_str!("../../dist-plugins/store.js").to_string()),
             _ => None,
         }
     }

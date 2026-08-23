@@ -77,18 +77,6 @@ function WindowControls() {
   );
 }
 
-function StoreButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button className="win-btn store-btn" aria-label="插件商店" onClick={onClick}>
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2">
-        <path d="M2 5 L8 2 L14 5 L8 8 Z" />
-        <path d="M2 5 V11 L8 14 L14 11 V5" />
-        <path d="M8 8 V14" />
-      </svg>
-    </button>
-  );
-}
-
 function SettingsButton({ onClick }: { onClick: () => void }) {
   return (
     <button className="win-btn settings-btn" aria-label="设置" onClick={onClick}>
@@ -110,9 +98,7 @@ function Shell() {
     workspace_folder: null,
   });
   const [exportPath, setExportPath] = useState<string | null>(null);
-  const [settingsTab, setSettingsTab] = useState<"general" | "plugins" | "diagnostics">("general");
-  const [installedPlugins, setInstalledPlugins] = useState<Array<{ id: string; name: string; version: string; description: string; has_client: boolean; has_server: boolean }>>([]);
-  const [storePlugins, setStorePlugins] = useState<Array<{ id: string; name: string; version: string; description: string; installed: boolean }>>([]);
+  const [settingsTab, setSettingsTab] = useState<"general" | "diagnostics">("general");
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const [currentDir, setCurrentDir] = useState("C:\\\\");
   const [dirEntries, setDirEntries] = useState<Array<{ name: string; path: string; is_dir: boolean }>>([]);
@@ -199,35 +185,6 @@ function Shell() {
     }
   };
 
-  const loadStore = async () => {
-    const list = await invoke<Array<{ id: string; name: string; version: string; description: string; installed: boolean }>>("get_plugin_store");
-    setStorePlugins(list);
-  };
-
-  const installPlugin = async (id: string) => {
-    try {
-      await invoke("install_store_plugin", { id });
-      await loadStore();
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const loadInstalled = async () => {
-    const list = await invoke<Array<{ id: string; name: string; version: string; description: string; has_client: boolean; has_server: boolean }>>("get_installed_plugins");
-    setInstalledPlugins(list);
-  };
-
-  const uninstallPlugin = async (id: string) => {
-    try {
-      await invoke("uninstall_plugin", { id });
-      await loadInstalled();
-      await loadStore();
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
   const openFolderPicker = async () => {
     const start = settings.workspace_folder ?? "C:\\\\";
     setCurrentDir(start);
@@ -278,7 +235,6 @@ function Shell() {
           )}
         </div>
         <div className="spacer" data-tauri-drag-region />
-          <StoreButton onClick={() => { void loadStore(); void loadInstalled(); setSettingsTab("plugins"); setSettingsOpen(true); }} />
         <SettingsButton onClick={() => setSettingsOpen(true)} />
         <WindowControls />
       </div>
@@ -298,7 +254,6 @@ function Shell() {
             </div>
             <div className="settings-tabs">
               <button className={settingsTab === "general" ? "active" : ""} onClick={() => setSettingsTab("general")}>通用</button>
-              <button className={settingsTab === "plugins" ? "active" : ""} onClick={() => { setSettingsTab("plugins"); void loadStore(); void loadInstalled(); }}>插件</button>
               <button className={settingsTab === "diagnostics" ? "active" : ""} onClick={() => setSettingsTab("diagnostics")}>诊断</button>
             </div>
             {settingsTab === "general" && (
@@ -333,44 +288,6 @@ function Shell() {
                   <button className="folder-browse" onClick={() => void openFolderPicker()}>浏览</button>
                 </div>
               </>
-            )}
-            {settingsTab === "plugins" && (
-              <div className="settings-plugins">
-                <div className="settings-section-title">已安装插件</div>
-                {installedPlugins.length === 0 ? (
-                  <div className="store-empty">暂无已安装插件</div>
-                ) : (
-                  installedPlugins.map((p) => (
-                    <div className="store-item" key={p.id}>
-                      <div className="store-item-info">
-                        <strong>{p.name}</strong>
-                        <small>{p.description || p.id}</small>
-                      </div>
-                      <button className="store-uninstall" onClick={() => void uninstallPlugin(p.id)}>卸载</button>
-                    </div>
-                  ))
-                )}
-                <div className="settings-section-title">插件商店</div>
-                {storePlugins.length === 0 ? (
-                  <div className="store-empty">暂无可用插件</div>
-                ) : (
-                  storePlugins.map((p) => (
-                    <div className="store-item" key={p.id}>
-                      <div className="store-item-info">
-                        <strong>{p.name}</strong>
-                        <small>{p.description || p.id}</small>
-                      </div>
-                      <button
-                        className="store-install"
-                        disabled={p.installed}
-                        onClick={() => void installPlugin(p.id)}
-                      >
-                        {p.installed ? "已安装" : "安装"}
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
             )}
             {settingsTab === "diagnostics" && (
               <>

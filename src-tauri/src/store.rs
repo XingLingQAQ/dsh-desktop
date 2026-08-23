@@ -1,21 +1,14 @@
-//! Built-in plugin store: a local catalog under `<project>/store/`.
+//! Desktop plugin directory: what is installed, and where installs land.
 //!
-//! Each subdirectory is a plugin package that can be installed into the
-//! desktop plugins directory (default `<project>/plugins/`).
+//! The catalog of installable plugins is not here — it comes from the registry
+//! (see `registry.rs`). This module owns the local side: the plugins root, the
+//! installed inventory, uninstall, and the directory listing the workspace
+//! picker walks.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-
-#[derive(Clone, Debug, Serialize)]
-pub struct StorePluginInfo {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    pub installed: bool,
-}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct InstalledPluginInfo {
@@ -59,10 +52,6 @@ fn data_root() -> PathBuf {
         .join("dsh-desktop")
 }
 
-pub fn store_root() -> PathBuf {
-    data_root().join("store")
-}
-
 pub fn plugins_root() -> PathBuf {
     std::env::var("DSH_DESKTOP_PLUGINS_DIR")
         .map(PathBuf::from)
@@ -92,61 +81,6 @@ fn read_pkg_meta(dir: &Path, id: &str) -> (String, String, String) {
         }
     }
     (id.to_string(), "0.0.0".to_string(), String::new())
-}
-
-/// List all plugin packages available in the store.
-pub fn list_store() -> Vec<StorePluginInfo> {
-    let root = store_root();
-    let plugins = plugins_root();
-    let mut out = Vec::new();
-    if let Ok(read_dir) = fs::read_dir(&root) {
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let id = entry.file_name().to_string_lossy().into_owned();
-            let (name, version, description) = read_pkg_meta(&path, &id);
-            let installed = plugins.join(&id).is_dir();
-            out.push(StorePluginInfo {
-                id,
-                name,
-                version,
-                description,
-                installed,
-            });
-        }
-    }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
-}
-
-fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
-/// Install a plugin from the store into the desktop plugins directory.
-pub fn install_store_plugin(id: &str) -> Result<(), String> {
-    let src = store_root().join(id);
-    if !src.is_dir() {
-        return Err(format!("store plugin not found: {id}"));
-    }
-    let dst = plugins_root().join(id);
-    if dst.exists() {
-        return Err(format!("plugin already installed: {id}"));
-    }
-    copy_dir(&src, &dst).map_err(|e| e.to_string())
 }
 
 /// List installed plugins in the desktop plugins directory.
