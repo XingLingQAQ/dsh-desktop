@@ -48,6 +48,20 @@ const DEFAULT_UPDATE_ENDPOINT: &str =
 /// of these right now, so offering it would only be a way to downgrade.
 pub const HARNESS_CHANNELS: [&str; 2] = ["latest", "next"];
 
+/// The two Windows status codes this actually hits, neither of which means
+/// anything to a reader: the process could not start at all, or it was killed.
+/// Anything else is reported as the raw code.
+fn explain_exit(code: i32) -> String {
+    match code {
+        // 0xC0000142 STATUS_DLL_INIT_FAILED — seen when the machine is out of
+        // memory and the loader cannot initialise a new process.
+        -1073741502 => "子进程无法启动（通常是内存不足）".to_string(),
+        // 0xC000013A STATUS_CONTROL_C_EXIT
+        -1073741510 => "下载被中断".to_string(),
+        other => format!("退出码 {other}"),
+    }
+}
+
 /// Run a program and hand back its stdout. Failures carry the stderr tail,
 /// which is where curl and npm put the part that explains what went wrong.
 fn run(program: &str, args: &[&str]) -> Result<String, String> {
@@ -58,9 +72,12 @@ fn run(program: &str, args: &[&str]) -> Result<String, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let tail = stderr.lines().rev().take(3).collect::<Vec<_>>().join(" ");
+        let reason = match output.status.code() {
+            Some(code) => explain_exit(code),
+            None => "被信号终止".to_string(),
+        };
         return Err(format!(
-            "{program} 退出码 {}{}",
-            output.status.code().unwrap_or(-1),
+            "{program} {reason}{}",
             if tail.is_empty() { String::new() } else { format!(": {tail}") }
         ));
     }
