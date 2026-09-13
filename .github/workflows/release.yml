@@ -94,8 +94,9 @@ jobs:
             - 也可以直接下载下面的 `-setup.exe` 手动安装。
             - 完整改动见本 Release 页面。
           # 带 `-` 的版本（0.1.0-rc.1 这种）标成预发布。注意 GitHub 的
-          # /releases/latest/ 会跳过预发布，所以内置清单地址对预发布版本无效，
-          # 那种情况下要把 /releases/download/<tag>/latest.json 填进设置的「更新源」。
+          # /releases/latest/ 会跳过预发布，而客户端内置的就是那个地址，所以
+          # 预发布只能手动下载安装，收不到自动更新——要发能自动更新的版本，
+          # 用不带 `-` 的 tag（并把 tauri.conf.json 的 version 一起改掉）。
           prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
           # 发布说明由 GitHub 依据提交生成：它会进入更新清单，客户端在更新面板里显示。
           generateReleaseNotes: true

@@ -35,13 +35,13 @@ use crate::settings::AppSettings;
 const REGISTRY: &str = "https://registry.npmmirror.com";
 const HARNESS_PACKAGE: &str = "@deepseek-ai/dsh";
 
-/// Where shell updates are fetched from when no address has been configured.
-///
-/// GitHub serves the newest published release's asset at this fixed path, so a
-/// build works without anyone filling the field in. It does not cover releases
-/// marked as pre-releases — GitHub's "latest" skips those — which need their
-/// tag-addressed URL entered in Settings.
-const DEFAULT_UPDATE_ENDPOINT: &str =
+/// Where shell updates are fetched from. GitHub serves the newest published
+/// release's asset at this fixed path, so a build knows its own release host
+/// without being told. It does not cover releases marked as pre-releases —
+/// GitHub's "latest" skips those — but a build that needs one is a build that
+/// should be pointed at a different repository, not a build that asks the user
+/// to paste a URL.
+const UPDATE_ENDPOINT: &str =
     "https://github.com/XingLingQAQ/dsh-desktop/releases/latest/download/latest.json";
 
 /// Channels offered for the harness. npm has an `alpha` tag too; it trails both
@@ -263,23 +263,12 @@ pub struct UpdateReport {
     pub client: ClientUpdate,
 }
 
-/// Build Tauri's updater from the settings rather than from `tauri.conf.json`,
-/// so the manifest address is something the user can set after the app is built
-/// (the shell ships without a release host of its own yet).
-fn build_updater(app: &tauri::AppHandle, settings: &AppSettings) -> Result<Updater, String> {
-    let endpoint = settings
-        .update_endpoint
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_UPDATE_ENDPOINT);
-    let url = tauri::Url::parse(endpoint).map_err(|e| format!("更新地址无效: {e}"))?;
-
-    // The verification key is read from the build's own configuration, which is
-    // the same value the bundler signs against — one place to rotate it, and no
-    // second copy to drift. A key typed into Settings overrides it, which is what
-    // lets this build be pointed at a release someone else signed.
-    let configured = app
+/// Build Tauri's updater. Both halves come from the build itself: the address
+/// from this file's constant, the verification key from the configuration the
+/// bundler signed against — one place to rotate it, and no second copy to drift.
+fn build_updater(app: &tauri::AppHandle) -> Result<Updater, String> {
+    let url = tauri::Url::parse(UPDATE_ENDPOINT).map_err(|e| format!("更新地址无效: {e}"))?;
+    let pubkey = app
         .config()
         .plugins
         .0
@@ -289,13 +278,6 @@ fn build_updater(app: &tauri::AppHandle, settings: &AppSettings) -> Result<Updat
         .unwrap_or("")
         .trim()
         .to_string();
-    let pubkey = settings
-        .update_pubkey
-        .as_deref()
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .map(str::to_string)
-        .unwrap_or(configured);
     if pubkey.is_empty() {
         return Err("这个构建里没有更新公钥，无法校验更新包".into());
     }
@@ -338,7 +320,7 @@ pub async fn check_updates(app: tauri::AppHandle) -> UpdateReport {
         });
 
     let current = app.package_info().version.to_string();
-    let client = match build_updater(&app, &settings) {
+    let client = match build_updater(&app) {
         Err(message) => ClientUpdate {
             current,
             error: Some(message),
@@ -392,8 +374,7 @@ pub async fn install_harness_update(
 /// does not return on success.
 #[tauri::command]
 pub async fn install_client_update(app: tauri::AppHandle) -> Result<(), String> {
-    let settings = settings_snapshot(&app);
-    let updater = build_updater(&app, &settings)?;
+    let updater = build_updater(&app)?;
     let update: Update = updater
         .check()
         .await

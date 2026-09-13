@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -34,6 +34,14 @@ pub struct Bridge {
     pub token: String,
     /// Desktop plugin registry (state + bundle serving).
     pub plugins: Arc<PluginManager>,
+    /// The most recent theme the DSH page reported.
+    ///
+    /// The page only reports when the theme *changes*, and the shell window is
+    /// up before the first report lands. Any window created later — the update
+    /// popup, the tray menu — would therefore never hear about the theme at all
+    /// and would render on the compiled-in light defaults whatever the app is
+    /// actually wearing. Those windows read this instead.
+    pub theme: Arc<Mutex<Option<ThemeSnapshot>>>,
 }
 
 impl Bridge {
@@ -88,7 +96,16 @@ where
     // content webview wanders onto — drive them.
     let api_path = format!("/api/{token}");
     let api_base = format!("http://127.0.0.1:{port}{api_path}");
-    let callback: Arc<dyn Fn(ThemeSnapshot) + Send + Sync> = Arc::new(on_report);
+    // The callback both records the snapshot and forwards it: a window created
+    // after this point can ask for the last one, and one created before (the
+    // shell) keeps receiving events.
+    let theme: Arc<Mutex<Option<ThemeSnapshot>>> = Arc::new(Mutex::new(None));
+    let theme_slot = theme.clone();
+    let forward: Arc<dyn Fn(ThemeSnapshot) + Send + Sync> = Arc::new(on_report);
+    let callback: Arc<dyn Fn(ThemeSnapshot) + Send + Sync> = Arc::new(move |snapshot| {
+        *theme_slot.lock().unwrap() = Some(snapshot.clone());
+        forward(snapshot);
+    });
     let thread_plugins = plugins.clone();
 
     std::thread::spawn(move || {
@@ -120,6 +137,7 @@ where
         base_url: format!("http://127.0.0.1:{port}"),
         token,
         plugins,
+        theme,
     })
 }
 

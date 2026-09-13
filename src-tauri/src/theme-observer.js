@@ -15,11 +15,15 @@
     "--dsw-alias-label-primary",
     "--dsw-alias-label-primary-inverted",
     "--dsw-alias-label-secondary",
+    "--dsw-alias-label-tertiary",
     "--dsw-specific-sidebar-fill",
     "--dsw-alias-state-success-primary",
     "--dsw-alias-state-error-primary",
     "--dsw-alias-state-warn-primary",
-    "--dsw-alias-interactive-bg-hover"
+    "--dsw-alias-interactive-bg-hover",
+    // Not a colour: the shell's own surfaces set text in DSH's mono stack so a
+    // hash or a version reads the same here as it does in the page.
+    "--dsw-font-markdown-code-font-family"
   ];
   function snap() {
     var out = { dark: false, vars: {} };

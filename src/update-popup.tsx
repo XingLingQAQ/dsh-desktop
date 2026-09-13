@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { applyTheme, type ThemeSnapshot } from "./theme";
+import { applyTheme, fetchTheme, type ThemeSnapshot } from "./theme";
 import "./styles.css";
 
 /** Mirrors `update::HarnessUpdate` — the DSH CLI the shell runs. */
@@ -27,14 +27,10 @@ type ClientUpdate = {
 
 type UpdateReport = { harness: HarnessUpdate; client: ClientUpdate };
 
-type UpdateSettings = {
-  update_endpoint: string | null;
+/** The shell's settings document, of which this window only reads one field. */
+type ShellSettings = {
   harness_channel: string | null;
-  update_pubkey: string | null;
-};
-
-/** The shell's settings document, of which this window only reads three fields. */
-type ShellSettings = UpdateSettings & Record<string, unknown>;
+} & Record<string, unknown>;
 
 const CHANNELS: Array<{ value: string; label: string }> = [
   { value: "latest", label: "默认通道" },
@@ -49,7 +45,7 @@ const CHANNELS: Array<{ value: string; label: string }> = [
  */
 const CLIENT_ERROR_TEXT: Record<string, string> = {
   "Could not fetch a valid release JSON from the remote":
-    "更新源上还没有可用的发布清单（还没发布过版本，或地址填错了）",
+    "更新源上还没有可用的发布清单（还没发布过版本）",
 };
 
 function describeClientError(raw: string): string {
@@ -89,19 +85,18 @@ function notesToLines(notes: string): string[] {
  * shell renders below the title bar is behind it. That is why this is a window
  * of its own — an always-on-top one, like the tray menu, which is above both.
  *
- * It checks on mount rather than waiting to be asked, because the reason to
- * open it is usually the version chip's dot, which the shell sets from its own
- * startup check; opening the popup should answer the question it was opened
- * for. It hides itself when it loses focus, which is what makes it behave like
- * a popover without a scrim to catch outside clicks.
+ * Two consequences of that window being kept alive between opens (it is built
+ * once, at startup, so the first click is not the one that pays for the page):
+ * nothing here remounts, so a check cannot simply run on mount — the shell tells
+ * this window when it has been shown, and that is what triggers one; and this
+ * window is created before the DSH page has reported a theme, so it asks for the
+ * last one rather than waiting for a change that may never come.
  */
 function UpdatePopup() {
-  const [endpoint, setEndpoint] = useState("");
-  const [pubkey, setPubkey] = useState("");
   const [channel, setChannel] = useState("latest");
 
   const [report, setReport] = useState<UpdateReport | null>(null);
-  const [checking, setChecking] = useState(true);
+  const [checking, setChecking] = useState(false);
   const [busy, setBusy] = useState<"client" | "harness" | null>(null);
   const [log, setLog] = useState<string[]>([]);
   const [progress, setProgress] = useState<{ chunk: number; total: number | null } | null>(null);
@@ -112,6 +107,7 @@ function UpdatePopup() {
   }, []);
 
   useEffect(() => {
+    void fetchTheme();
     const un = listen<ThemeSnapshot>("theme-changed", (event) => {
       applyTheme(event.payload);
     });
@@ -130,24 +126,11 @@ function UpdatePopup() {
   }, []);
 
   // The settings the check reads live in the shell's store, so they are loaded
-  // into this window's form before the first check runs.
+  // into this window's form on mount.
   useEffect(() => {
     let disposed = false;
     void invoke<ShellSettings>("get_settings").then((saved) => {
-      if (disposed) return;
-      setEndpoint(saved.update_endpoint ?? "");
-      setPubkey(saved.update_pubkey ?? "");
-      setChannel(saved.harness_channel ?? "latest");
-      void invoke<UpdateReport>("check_updates")
-        .then((next) => {
-          if (!disposed) setReport(next);
-        })
-        .catch((error) => {
-          if (!disposed) setNotice(String(error));
-        })
-        .finally(() => {
-          if (!disposed) setChecking(false);
-        });
+      if (!disposed) setChannel(saved.harness_channel ?? "latest");
     });
     return () => {
       disposed = true;
@@ -163,25 +146,36 @@ function UpdatePopup() {
     return () => window.removeEventListener("keydown", onKey);
   }, [close]);
 
-  // The form is saved before a check rather than behind a Save button: the
-  // check reads the settings on the other side, so anything typed here has to
-  // be persisted first or it would be checking the previous configuration.
-  const persist = useCallback(async () => {
-    await invoke<UpdateSettings>("set_update_settings", { endpoint, channel, pubkey });
-  }, [endpoint, channel, pubkey]);
+  // The channel picker is saved as it is chosen: the check reads the settings on
+  // the other side, so a check started right after a change would otherwise use
+  // the previous channel.
+  const setChannelAndSave = useCallback(async (next: string) => {
+    setChannel(next);
+    await invoke<ShellSettings>("set_harness_channel", { channel: next });
+  }, []);
 
-  const check = async () => {
+  const check = useCallback(async () => {
     setChecking(true);
     setNotice(null);
     try {
-      await persist();
       setReport(await invoke<UpdateReport>("check_updates"));
     } catch (error) {
       setNotice(String(error));
     } finally {
       setChecking(false);
     }
-  };
+  }, []);
+
+  // The shell says when this window has been put on screen; that is the moment
+  // to look again, since the report from last time is as old as that look.
+  useEffect(() => {
+    const un = listen("update-popup-shown", () => {
+      void check();
+    });
+    return () => {
+      un.then((fn) => fn());
+    };
+  }, [check]);
 
   const installClient = async () => {
     setBusy("client");
@@ -201,7 +195,6 @@ function UpdatePopup() {
     setNotice(null);
     setLog([]);
     try {
-      await persist();
       await invoke<string>("install_harness_update", { version });
       setNotice("安装完成，正在重启客户端…");
       await invoke("restart_app");
@@ -289,7 +282,7 @@ function UpdatePopup() {
 
       {notice !== null && <p className="upd-notice">{notice}</p>}
 
-      {/* 内核和更新源默认折起来：这个弹窗先回答「客户端要不要更新」。 */}
+      {/* 内核默认折起来：这个弹窗先回答「客户端要不要更新」。 */}
       <details className="upd-more">
         <summary>DSH 内核</summary>
         <div className="upd-moreBody">
@@ -304,7 +297,7 @@ function UpdatePopup() {
             <select
               value={channel}
               disabled={busy !== null}
-              onChange={(event) => setChannel(event.target.value)}
+              onChange={(event) => void setChannelAndSave(event.target.value)}
             >
               {CHANNELS.map((entry) => (
                 <option key={entry.value} value={entry.value}>
@@ -323,36 +316,6 @@ function UpdatePopup() {
             </button>
           )}
           {log.length > 0 && <pre className="upd-log">{log.join("\n")}</pre>}
-        </div>
-      </details>
-
-      <details className="upd-more">
-        <summary>更新源</summary>
-        <div className="upd-moreBody">
-          <p className="upd-note">
-            客户端的更新清单地址，Tauri 的发布格式，需要 HTTPS。留空就用内置的
-            GitHub Releases 地址。
-          </p>
-          <label className="upd-field">
-            <span>清单地址</span>
-            <input
-              value={endpoint}
-              placeholder="留空则使用内置地址"
-              spellCheck={false}
-              onChange={(event) => setEndpoint(event.target.value)}
-              onBlur={() => void persist()}
-            />
-          </label>
-          <label className="upd-field">
-            <span>签名公钥</span>
-            <input
-              value={pubkey}
-              placeholder="留空则使用内置公钥"
-              spellCheck={false}
-              onChange={(event) => setPubkey(event.target.value)}
-              onBlur={() => void persist()}
-            />
-          </label>
         </div>
       </details>
     </div>

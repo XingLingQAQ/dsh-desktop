@@ -51,6 +51,10 @@ const CORNER_RADIUS: f64 = 12.0;
 const ATTACH_PORTS: [u16; 2] = [17890, 3080];
 /// How long to wait for the readiness line.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(45);
+/// Update popup window geometry (must match `--popup-*` in styles.css).
+const POPUP_WIDTH: f64 = 372.0;
+const POPUP_HEIGHT: f64 = 424.0;
+const POPUP_RADIUS: f64 = 12.0;
 
 /// Launch sequence state, polled by the splash page and the shell title bar.
 #[derive(Clone, Serialize)]
@@ -145,25 +149,27 @@ fn set_workspace_folder(
     Ok(settings.clone())
 }
 
-/// Persist the update configuration. Empty strings clear a field rather than
-/// storing blanks, so `Option::is_none` keeps meaning "not set".
+/// Pick which npm dist-tag the harness update check follows. An empty string
+/// clears it, so `Option::is_none` keeps meaning "not set" (and the check falls
+/// back to the default channel).
 #[tauri::command]
-fn set_update_settings(
+fn set_harness_channel(
     state: tauri::State<Arc<Mutex<AppSettings>>>,
-    endpoint: String,
     channel: String,
-    pubkey: String,
 ) -> Result<AppSettings, String> {
-    let trimmed = |value: String| {
-        let value = value.trim().to_string();
-        (!value.is_empty()).then_some(value)
-    };
+    let channel = channel.trim().to_string();
     let mut settings = state.lock().unwrap();
-    settings.update_endpoint = trimmed(endpoint);
-    settings.harness_channel = trimmed(channel);
-    settings.update_pubkey = trimmed(pubkey);
+    settings.harness_channel = (!channel.is_empty()).then_some(channel);
     settings::save(&settings).map_err(|e| e.to_string())?;
     Ok(settings.clone())
+}
+
+/// The last theme the DSH page reported, for windows created after the page
+/// started watching it — they missed the only `theme-changed` event there was.
+/// `None` before the page has reported anything.
+#[tauri::command]
+fn get_theme(bridge: tauri::State<Arc<Bridge>>) -> Option<crate::bridge::ThemeSnapshot> {
+    bridge.theme.lock().unwrap().clone()
 }
 
 /// Version this build reports, from tauri.conf.json — the number the update
@@ -400,6 +406,11 @@ fn enter_main(app: &tauri::AppHandle) {
 ///
 /// The window hides itself when it loses focus, which is what stands in for the
 /// scrim a popover would normally use to catch clicks outside it.
+///
+/// It is built at startup rather than here (\ref prepare_update_popup), so this
+/// path only positions and shows it. Building it on the first click made that
+/// click pay for a webview, a page load and a React mount — seconds in dev,
+/// where the modules arrive unbundled.
 fn show_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
     let main = app.get_window("main").ok_or("主窗口不存在")?;
     let scale = main.scale_factor().unwrap_or(1.0);
@@ -410,59 +421,79 @@ fn show_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
         origin.y + ((TITLEBAR_HEIGHT + 6.0) * scale) as i32,
     );
 
-    let popup = match app.get_webview_window("update-popup") {
-        // The chip toggles: a second click closes it. The window also hides
-        // itself when it loses focus, but a toggle that does not depend on
-        // focus events is what makes the chip's behaviour predictable.
-        Some(win) if win.is_visible().unwrap_or(false) => {
-            let _ = win.hide();
-            return Ok(());
-        }
-        Some(win) => win,
-        None => {
-            let built = WebviewWindowBuilder::new(
-                app,
-                "update-popup",
-                WebviewUrl::App("update-popup.html".into()),
-            )
-            .inner_size(348.0, 400.0)
-            .decorations(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .resizable(false)
-            .visible(false)
-            .transparent(false)
-            .build()
-            .map_err(|e| format!("创建更新窗口失败: {e}"))?;
-
-            // 透明渲染在软件合成下不可靠，所以窗口不透明、圆角交给区域裁剪。
-            if let Some(window) = app.get_window("update-popup") {
-                apply_rounded_region_r(&window, 12.0);
-            }
-            let hide_on_blur = built.clone();
-            built.on_window_event(move |event| {
-                if let WindowEvent::Focused(false) = event {
-                    // A blur arrives while the window is still being created,
-                    // before it has ever been shown, so the hide waits a moment
-                    // and then checks rather than trusting the event alone.
-                    let window = hide_on_blur.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_millis(250));
-                        if window.is_visible().unwrap_or(false)
-                            && !window.is_focused().unwrap_or(false)
-                        {
-                            let _ = window.hide();
-                        }
-                    });
-                }
-            });
-            built
-        }
+    let Some(popup) = app.get_webview_window("update-popup") else {
+        return Err("更新窗口未创建".into());
     };
+    // The chip toggles: a second click closes it. The window also hides itself
+    // when it loses focus, but a toggle that does not depend on focus events is
+    // what makes the chip's behaviour predictable.
+    if popup.is_visible().unwrap_or(false) {
+        let _ = popup.hide();
+        return Ok(());
+    }
 
     let _ = popup.set_position(position);
+    // The region is applied when the window is built; re-apply on show so a
+    // window that was not yet realized then still gets its corners.
+    if let Some(window) = app.get_window("update-popup") {
+        apply_rounded_region_r(&window, POPUP_RADIUS);
+    }
     let _ = popup.show();
     let _ = popup.set_focus();
+    // The window is kept alive between opens, so its last report is as old as
+    // the last time it was looked at; this is what tells it to look again.
+    let _ = app.emit_to(
+        tauri::EventTarget::webview_window("update-popup"),
+        "update-popup-shown",
+        (),
+    );
+    Ok(())
+}
+
+/// Build the update popup window, hidden, so the first click only has to show it.
+///
+/// A window of its own rather than a layer in the shell page: the DSH UI is a
+/// second, native webview placed over the shell's from the title bar down, so
+/// anything the shell draws below the title bar is behind it. An always-on-top
+/// window is above both, the same trick the tray menu uses.
+fn prepare_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
+    if app.get_webview_window("update-popup").is_some() {
+        return Ok(());
+    }
+    let built = WebviewWindowBuilder::new(
+        app,
+        "update-popup",
+        WebviewUrl::App("update-popup.html".into()),
+    )
+    .inner_size(POPUP_WIDTH, POPUP_HEIGHT)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .resizable(false)
+    .visible(false)
+    .transparent(false)
+    .build()
+    .map_err(|e| format!("创建更新窗口失败: {e}"))?;
+
+    // 透明渲染在软件合成下不可靠，所以窗口不透明、圆角交给区域裁剪。
+    if let Some(window) = app.get_window("update-popup") {
+        apply_rounded_region_r(&window, POPUP_RADIUS);
+    }
+    let hide_on_blur = built.clone();
+    built.on_window_event(move |event| {
+        if let WindowEvent::Focused(false) = event {
+            // A blur arrives while the window is still being created, before it
+            // has ever been shown, so the hide waits a moment and then checks
+            // rather than trusting the event alone.
+            let window = hide_on_blur.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(250));
+                if window.is_visible().unwrap_or(false) && !window.is_focused().unwrap_or(false) {
+                    let _ = window.hide();
+                }
+            });
+        }
+    });
     Ok(())
 }
 
@@ -940,7 +971,8 @@ pub fn run() {
             set_close_to_tray,
             set_auto_start,
             set_workspace_folder,
-            set_update_settings,
+            set_harness_channel,
+            get_theme,
             get_app_version,
             open_update_popup,
             check_updates,
@@ -1069,6 +1101,13 @@ pub fn run() {
                 .build(app)
                 .map_err(|e| format!("托盘创建失败: {e}"))?;
             app.manage(tray);
+
+            // 更新弹窗在这里就建好（隐藏），别等第一次点击再建：那一次点击会
+            // 付掉整个 webview 构建 + 页面加载 + React 挂载的代价，开发模式下
+            // 模块是逐个请求的，能卡好几秒。
+            if let Err(error) = prepare_update_popup(app.handle()) {
+                eprintln!("dsh-desktop: prepare update popup failed: {error}");
+            }
 
             // 关闭主窗口时：若开启“关闭到托盘”，则隐藏而不是退出。
             if let Some(main) = app.get_window("main") {

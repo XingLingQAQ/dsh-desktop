@@ -15,9 +15,7 @@ type AppSettings = {
   close_to_tray: boolean;
   auto_start: boolean;
   workspace_folder: string | null;
-  update_endpoint: string | null;
   harness_channel: string | null;
-  update_pubkey: string | null;
 };
 
 const STATUS_TEXT: Record<HostStatus, string> = {
@@ -99,9 +97,7 @@ function Shell() {
     close_to_tray: false,
     auto_start: false,
     workspace_folder: null,
-    update_endpoint: null,
     harness_channel: null,
-    update_pubkey: null,
   });
   const [exportPath, setExportPath] = useState<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<"general" | "diagnostics">("general");
