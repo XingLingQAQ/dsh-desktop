@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { DeepSeekLogo } from "./components/DeepSeekLogo";
-import { UpdatePanel } from "./components/UpdatePanel";
+import { UpdatePopup } from "./components/UpdatePopup";
 import { applyTheme, type ThemeSnapshot } from "./theme";
 import "./styles.css";
 
@@ -105,8 +105,12 @@ function Shell() {
     update_pubkey: null,
   });
   const [exportPath, setExportPath] = useState<string | null>(null);
-  const [settingsTab, setSettingsTab] = useState<"general" | "update" | "diagnostics">("general");
+  const [settingsTab, setSettingsTab] = useState<"general" | "diagnostics">("general");
   const [appVersion, setAppVersion] = useState("");
+  const [updateOpen, setUpdateOpen] = useState(false);
+  // Set by the popup's own startup check, which runs whether or not anyone
+  // opens it. The chip is the only place it surfaces.
+  const [updateReady, setUpdateReady] = useState(false);
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const [currentDir, setCurrentDir] = useState("C:\\\\");
   const [dirEntries, setDirEntries] = useState<Array<{ name: string; path: string; is_dir: boolean }>>([]);
@@ -234,9 +238,16 @@ function Shell() {
             DeepSeek Harness
           </span>
           {appVersion !== "" && (
-            <span className="brand-version" data-tauri-drag-region>
+            <button
+              className="brand-version"
+              data-ready={updateReady}
+              data-tauri-drag-region
+              title={updateReady ? "有新版本可用" : "版本与更新"}
+              onClick={() => setUpdateOpen((open) => !open)}
+            >
               v{appVersion}
-            </span>
+              {updateReady && <span className="brand-versionDot" aria-hidden="true" />}
+            </button>
           )}
         </div>
         <div className="spacer" data-tauri-drag-region />
@@ -267,7 +278,6 @@ function Shell() {
             </div>
             <div className="settings-tabs">
               <button className={settingsTab === "general" ? "active" : ""} onClick={() => setSettingsTab("general")}>通用</button>
-              <button className={settingsTab === "update" ? "active" : ""} onClick={() => setSettingsTab("update")}>更新</button>
               <button className={settingsTab === "diagnostics" ? "active" : ""} onClick={() => setSettingsTab("diagnostics")}>诊断</button>
             </div>
             {settingsTab === "general" && (
@@ -303,12 +313,6 @@ function Shell() {
                 </div>
               </>
             )}
-            {settingsTab === "update" && (
-              <UpdatePanel
-                settings={settings}
-                onSettings={(patch) => setSettings((current) => ({ ...current, ...patch }))}
-              />
-            )}
             {settingsTab === "diagnostics" && (
               <>
                 <button className="settings-export" onClick={() => void exportDiagnostics()}>导出诊断信息</button>
@@ -317,6 +321,14 @@ function Shell() {
             )}
           </div>
         )}
+        <UpdatePopup
+          open={updateOpen}
+          onClose={() => setUpdateOpen(false)}
+          version={appVersion}
+          settings={settings}
+          onSettings={(patch) => setSettings((current) => ({ ...current, ...patch }))}
+          onAvailable={setUpdateReady}
+        />
         {folderPickerOpen && (
           <div className="folder-picker-overlay" onClick={() => setFolderPickerOpen(false)}>
             <div className="folder-picker" onClick={(e) => e.stopPropagation()}>

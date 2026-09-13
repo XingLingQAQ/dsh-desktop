@@ -85,6 +85,14 @@ jobs:
           releaseName: "DSH Desktop ${{ github.event.inputs.tag || github.ref_name }}"
           # 非草稿：更新清单必须挂在已发布的 Release 上才拉得到。
           releaseDraft: false
+          # 这段会写进更新清单的 notes，客户端在更新弹窗里显示。GitHub 自动生成的
+          # 发布说明不会进清单（tauri-action 生成 latest.json 时正文还是空的），
+          # 所以想知道改了什么要看 Release 页面，这里只说明怎么装。
+          releaseBody: |
+            #### 更新方式
+            - 弹窗里点「下载并安装」，会自动下载覆盖并重启，设置与插件都保留。
+            - 也可以直接下载下面的 `-setup.exe` 手动安装。
+            - 完整改动见本 Release 页面。
           # 带 `-` 的版本（0.1.0-rc.1 这种）标成预发布。注意 GitHub 的
           # /releases/latest/ 会跳过预发布，所以内置清单地址对预发布版本无效，
           # 那种情况下要把 /releases/download/<tag>/latest.json 填进设置的「更新源」。
