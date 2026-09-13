@@ -4,3 +4,51 @@ dist-plugins
 src-tauri/target
 src-tauri/gen/schemas
 *.log
+
+# minisign private key for release signing — never commit
+src-tauri/updater-signing.key
+src-tauri/updater-signing.key.pub
+
+# Third-party plugin bundles adopted from other authors. They are installed by
+# the plugin store, not shipped in this repository — theirs to license, and much
+# larger than our own code. `plugins/desktop-hello` stays: it is the example and
+# the only one written here.
+plugins/@liustack/
+plugins/dsh-better-sidebar/
+plugins/dsh-dream-skin/
+plugins/dsh-plus/
+plugins/dsh-skin-market/
+plugins/whale-girl/
+plugins/desktop-hello2/
+
+# One-off CDP probes and screenshots from debugging sessions. The CDP helpers
+# that stayed useful are tracked; these are the ones that answered one question
+# and were never needed again.
+scripts/cdpbridge.py
+scripts/cdpenable.py
+scripts/cdphardreset.py
+scripts/cdpmanager.py
+scripts/cdpmgrrows.py
+scripts/cdpnavshell.py
+scripts/cdppet.py
+scripts/cdpphase.py
+scripts/cdpplugin.py
+scripts/cdpprobe.py
+scripts/cdpproxy.py
+scripts/cdprollback.py
+scripts/cdpshell2.py
+scripts/cdpstatelog.py
+scripts/cdptoggle.py
+scripts/cdptokens.py
+scripts/cdpunreach.py
+scripts/cdpwatch.py
+scripts/drive-*.js
+scripts/drive-*.py
+scripts/installprobe.py
+scripts/make-probe-skill.py
+scripts/patchpoke.py
+scripts/probe-*.js
+scripts/probe-*.py
+scripts/verify-*.js
+shot*.png
+skills-probe.json

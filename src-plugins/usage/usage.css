@@ -1,0 +1,279 @@
+/* 用量 dashboard. Sizes and colors come from the `--dsw-*` tokens, like the
+ * other tabs in this section, so the panel follows the app theme with no local
+ * light/dark branching.
+ *
+ * The grid is two columns at the section's width. Cards that need horizontal
+ * room — the stacked token series, the dual-axis trend, the tool histogram and
+ * the table — ask for both columns, so nothing is squeezed into a 240px box
+ * with a dozen categories on it. */
+
+.dsx-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-usage-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  margin-bottom: -8px;
+}
+
+.dsx-usage-filler {
+  flex: 1;
+}
+
+.dsx-usage-meta {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Matches the icon buttons on the other tabs: 28px ghost capsule. */
+.dsx-usage-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.dsx-usage-icon:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-usage-icon:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.dsx-usage-icon:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+/* The reload glyph turns while a recount is in flight, so the figures stay on
+ * screen and the only motion is the button itself. */
+.dsx-usage-spin {
+  display: inline-grid;
+  place-items: center;
+  animation: dsx-usage-rotate 0.9s linear infinite;
+}
+
+@keyframes dsx-usage-rotate {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dsx-usage-spin {
+    animation: none;
+  }
+}
+
+.dsx-usage-status,
+.dsx-usage-error {
+  margin: 0;
+  padding: 24px 0;
+  font-size: var(--dsw-font-s-14-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-usage-error {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsx-usage-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.dsx-usage-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.dsx-usage-statLabel {
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-usage-statValue {
+  font-size: var(--dsw-font-m-18-font-size);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsx-usage-statNote {
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsx-usage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dsx-usage-card {
+  min-width: 0;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+/* A card that asked for the full grid width. */
+.dsx-usage-card[data-span="2"] {
+  grid-column: 1 / -1;
+}
+
+.dsx-usage-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 8px;
+  font-size: var(--dsw-font-s-strong-14-font-size);
+  font-weight: var(--dsw-font-s-strong-14-font-weight, 600);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsx-usage-titleNote {
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  font-weight: 400;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dsx-usage-chart {
+  width: 100%;
+}
+
+/* The session table is the tallest block on the page, so it scrolls inside a
+ * fixed height with its header pinned — the summary above stays reachable. */
+.dsx-usage-tableWrap {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.dsx-usage-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--dsw-font-xs-13-font-size);
+}
+
+.dsx-usage-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-2);
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.dsx-usage-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+
+.dsx-usage-table tr:last-child td {
+  border-bottom: none;
+}
+
+.dsx-usage-sort {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.dsx-usage-sort:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-usage-sort[data-active="true"] {
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-usage-table th.dsx-usage-num .dsx-usage-sort {
+  justify-content: flex-end;
+}
+
+.dsx-usage-arrow {
+  color: var(--dsw-alias-label-tertiary);
+  opacity: 0.5;
+}
+
+.dsx-usage-arrow[data-desc="true"] {
+  color: var(--dsw-alias-brand-primary);
+  opacity: 1;
+}
+
+.dsx-usage-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsx-usage-mono {
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-xxxs-11-font-size);
+}
+
+.dsx-usage-clip {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dsx-usage-outcome {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-usage-bad {
+  color: var(--dsw-alias-state-error-primary);
+}

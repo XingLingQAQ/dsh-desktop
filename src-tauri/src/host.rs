@@ -42,15 +42,9 @@ impl HostProcess {
         let mut cmd = Command::new(&node);
         cmd.arg(&cli).arg("--profile").arg("web");
 
-        // Desktop backend overlay: `$DSH_HOME/desktop-overlay/cordis.yml` is an
-        // extra --patch layer loaded after the profile. It is how desktop-managed
-        // host-side plugins (notifications, tools, services) enter the Host.
-        if let Some(home) = &snapshot.dsh_home {
-            let overlay = Path::new(home).join("desktop-overlay").join("cordis.yml");
-            if overlay.is_file() {
-                cmd.arg("--patch").arg(overlay);
-            }
-        }
+        // 桌面端自带 WebView 显示 Web UI,禁止 DSH 宿主再额外用 `open` 包拉起系统默认浏览器(Edge)。
+        // `--no-open` 会让 web-app 的 openBrowser=false,跳过 Node 侧的 spawnBrowserLauncher。
+        cmd.arg("--no-open");
 
         match port {
             Some(p) => {

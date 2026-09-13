@@ -36,6 +36,410 @@
     return v !== null && typeof v === "object";
   }
 
+  // ------------------------------------------------------- ownership bookkeeping
+  // A plugin is not trusted to clean up after itself. Every node a plugin puts
+  // into the document while its `apply` runs is recorded under its id and
+  // tagged, so unmounting can reclaim whatever the plugin's own disposer missed
+  // (or never ran at all). Without this, a plugin that appends to `document.body`
+  // and relies on an `apply`-returned disposer leaves its UI on screen after the
+  // shell has already disposed its fiber — the plugin looks "paused" everywhere
+  // except the part the user can see.
+  //
+  // Only the synchronous `apply` window is attributed here. Timers, listeners
+  // and sockets a plugin opens later are a separate ledger (not yet built), so
+  // a paused plugin can still tick in the background — it just cannot show.
+  var OWNER_ATTR = "data-dsh-owner";
+  var ledgers = new Map(); // plugin id -> { nodes: [] }
+  var instrumented = new Set(); // plugin ids whose apply the shell wrapped
+  var owner = null; // plugin id whose apply is currently on the stack
+  var patchedDom = false;
+
+  function ledgerFor(id) {
+    var ledger = ledgers.get(id);
+    if (ledger === undefined) {
+      ledger = { nodes: [], timers: [], intervals: [], frames: [], listeners: [], closables: [], observers: [] };
+      ledgers.set(id, ledger);
+    }
+    return ledger;
+  }
+
+  // ------------------------------------------------------- async attribution
+  // The synchronous `apply` window catches everything a plugin builds up front,
+  // but the interesting leaks come later: a plugin that awaits its config and
+  // only then opens an interval and an event stream. Native `await` resumes
+  // outside any wrapper we can install, so the owner cannot simply be carried
+  // along — the fallback is to ask the call stack whose bundle is calling.
+  //
+  // Every desktop plugin bundle is served from `/plugins/<id>/client.js`, so a
+  // stack frame naming that path identifies the owner. The answer is cached per
+  // callback object, which is why a repeatedly-scheduled `tick` costs one stack
+  // walk in total rather than one per call.
+  var ownedFns = new WeakMap();
+
+  function attributeFromStack() {
+    if (instrumented.size === 0) return null;
+    var stack;
+    try {
+      stack = new Error().stack;
+    } catch (e) {
+      return null;
+    }
+    if (typeof stack !== "string") return null;
+    var found = null;
+    instrumented.forEach(function (id) {
+      if (found === null && stack.indexOf("/plugins/" + id + "/") !== -1) found = id;
+    });
+    return found;
+  }
+
+  // Owner of the code calling right now: the apply window if one is open,
+  // otherwise whoever the stack points at. `fn` is only used as a cache key.
+  function callerOwner(fn) {
+    if (owner !== null) return owner;
+    if (typeof fn === "function") {
+      var cached = ownedFns.get(fn);
+      if (cached !== undefined) return cached;
+      var resolved = attributeFromStack();
+      ownedFns.set(fn, resolved);
+      return resolved;
+    }
+    return attributeFromStack();
+  }
+
+  // Run a plugin's callback with its owner restored, so anything it schedules in
+  // turn is attributed without another stack walk.
+  function inOwner(id, fn) {
+    if (typeof fn !== "function") return fn;
+    return function () {
+      var previous = owner;
+      owner = id;
+      try {
+        return fn.apply(this, arguments);
+      } finally {
+        owner = previous;
+      }
+    };
+  }
+
+  function claim(node) {
+    if (owner === null || !isObject(node)) return;
+    // Tag elements so a reclaim can also find them after a re-mount replaced
+    // this ledger (a leftover from the previous generation is still ours).
+    try {
+      if (node.nodeType === 1 && node.getAttribute(OWNER_ATTR) === null) {
+        node.setAttribute(OWNER_ATTR, owner);
+      }
+    } catch (e) {}
+    ledgerFor(owner).nodes.push(node);
+  }
+
+  // Patch the insertion points once, globally. They are pass-through unless a
+  // plugin's apply is on the stack, so DSH's own DOM work is never recorded.
+  function patchDom() {
+    if (patchedDom) return;
+    patchedDom = true;
+    var protos = [
+      [Node.prototype, ["appendChild", "insertBefore", "replaceChild"]],
+      [Element.prototype, ["append", "prepend", "insertAdjacentElement", "after", "before"]]
+    ];
+    protos.forEach(function (pair) {
+      var proto = pair[0];
+      pair[1].forEach(function (method) {
+        var original = proto[method];
+        if (typeof original !== "function") return;
+        proto[method] = function () {
+          var result = original.apply(this, arguments);
+          if (owner !== null) {
+            for (var i = 0; i < arguments.length; i++) {
+              var arg = arguments[i];
+              if (isObject(arg) && typeof arg.nodeType === "number") claim(arg);
+            }
+          }
+          return result;
+        };
+      });
+    });
+  }
+
+  var patchedAsync = false;
+
+  // Timers, listeners, streams and observers a plugin opens go on its ledger so
+  // a paused plugin actually stops working, not just stops showing. Pass-through
+  // whenever the caller is not an instrumented plugin.
+  function patchAsync() {
+    if (patchedAsync) return;
+    patchedAsync = true;
+
+    var rawSetTimeout = window.setTimeout;
+    var rawSetInterval = window.setInterval;
+    var rawRaf = window.requestAnimationFrame;
+
+    window.setTimeout = function (fn) {
+      var id = callerOwner(fn);
+      if (id === null) return rawSetTimeout.apply(window, arguments);
+      var args = [].slice.call(arguments);
+      args[0] = inOwner(id, fn);
+      var handle = rawSetTimeout.apply(window, args);
+      ledgerFor(id).timers.push(handle);
+      return handle;
+    };
+
+    window.setInterval = function (fn) {
+      var id = callerOwner(fn);
+      if (id === null) return rawSetInterval.apply(window, arguments);
+      var args = [].slice.call(arguments);
+      args[0] = inOwner(id, fn);
+      var handle = rawSetInterval.apply(window, args);
+      ledgerFor(id).intervals.push(handle);
+      return handle;
+    };
+
+    if (typeof rawRaf === "function") {
+      window.requestAnimationFrame = function (fn) {
+        var id = callerOwner(fn);
+        if (id === null) return rawRaf.call(window, fn);
+        var handle = rawRaf.call(window, inOwner(id, fn));
+        ledgerFor(id).frames.push(handle);
+        return handle;
+      };
+    }
+
+    // Listeners on the shared targets only: a plugin's own elements go away with
+    // the nodes, and instrumenting every element would tax the whole page.
+    [window, document, document.documentElement].forEach(function (target) {
+      if (!target || typeof target.addEventListener !== "function") return;
+      var rawAdd = target.addEventListener;
+      target.addEventListener = function (type, handler, options) {
+        var id = callerOwner(handler);
+        if (id === null) return rawAdd.apply(this, arguments);
+        var bound = inOwner(id, handler);
+        ledgerFor(id).listeners.push({ target: this, type: type, handler: bound, options: options });
+        return rawAdd.call(this, type, bound, options);
+      };
+    });
+
+    patchClosable("EventSource");
+    patchClosable("WebSocket");
+    patchObserver("MutationObserver");
+    patchObserver("ResizeObserver");
+    patchObserver("IntersectionObserver");
+  }
+
+  // Long-lived connections: recorded so a pause closes them instead of leaving a
+  // paused plugin streaming from its backend.
+  function patchClosable(name) {
+    var Original = window[name];
+    if (typeof Original !== "function") return;
+    function Wrapped(url, config) {
+      var instance = arguments.length > 1 ? new Original(url, config) : new Original(url);
+      var id = callerOwner(null);
+      if (id !== null) ledgerFor(id).closables.push(instance);
+      return instance;
+    }
+    Wrapped.prototype = Original.prototype;
+    ["CONNECTING", "OPEN", "CLOSED", "CLOSING"].forEach(function (key) {
+      if (key in Original) Wrapped[key] = Original[key];
+    });
+    window[name] = Wrapped;
+  }
+
+  function patchObserver(name) {
+    var Original = window[name];
+    if (typeof Original !== "function") return;
+    var rawObserve = Original.prototype.observe;
+    if (typeof rawObserve !== "function") return;
+    Original.prototype.observe = function () {
+      var id = callerOwner(null);
+      if (id !== null) ledgerFor(id).observers.push(this);
+      return rawObserve.apply(this, arguments);
+    };
+  }
+
+  function reclaim(id, label) {
+    var removed = 0;
+    var stopped = 0;
+    var ledger = ledgers.get(id);
+    if (ledger !== undefined) {
+      ledger.nodes.forEach(function (node) {
+        try {
+          if (typeof node.remove === "function") {
+            node.remove();
+            removed += 1;
+          }
+        } catch (e) {}
+      });
+      ledger.timers.forEach(function (handle) {
+        try { clearTimeout(handle); stopped += 1; } catch (e) {}
+      });
+      ledger.intervals.forEach(function (handle) {
+        try { clearInterval(handle); stopped += 1; } catch (e) {}
+      });
+      ledger.frames.forEach(function (handle) {
+        try { cancelAnimationFrame(handle); stopped += 1; } catch (e) {}
+      });
+      ledger.listeners.forEach(function (row) {
+        try { row.target.removeEventListener(row.type, row.handler, row.options); stopped += 1; } catch (e) {}
+      });
+      ledger.closables.forEach(function (conn) {
+        try {
+          if (typeof conn.close === "function") { conn.close(); stopped += 1; }
+        } catch (e) {}
+      });
+      ledger.observers.forEach(function (observer) {
+        try {
+          if (typeof observer.disconnect === "function") { observer.disconnect(); stopped += 1; }
+        } catch (e) {}
+      });
+      ledgers.delete(id);
+    }
+    // Anything still tagged with this id — a leftover from a generation whose
+    // ledger is gone, e.g. one recorded before a reload.
+    try {
+      var stragglers = document.querySelectorAll("[" + OWNER_ATTR + "=\"" + String(id).replace(/"/g, "\\\"") + "\"]");
+      for (var i = 0; i < stragglers.length; i++) {
+        stragglers[i].remove();
+        removed += 1;
+      }
+    } catch (e) {}
+    if (removed > 0 || stopped > 0) {
+      // Loud on purpose: a plugin whose own cleanup worked leaves nothing to
+      // reclaim, so any count here names a plugin that needs fixing.
+      console.warn(
+        "[dsh-desktop] reclaimed " + String(removed) + " node(s) and stopped " + String(stopped) +
+        " effect(s) from \"" + String(id) + "\" on " + (label || "unmount") +
+        " - the plugin's own cleanup did not release them"
+      );
+    }
+    return removed + stopped;
+  }
+
+  // Wrap a plugin's `apply` so the shell owns its teardown. The original return
+  // value is passed through UNTOUCHED: cordis accepts a disposer function, a
+  // promise, or an (async) iterator of disposers, and rewriting that shape would
+  // silently drop the disposers of generator-style plugins. The reclaim is
+  // registered as a separate effect BEFORE the plugin body runs, so it disposes
+  // LAST — after the plugin's own cleanup has had its turn.
+  function instrumentApply(id, realApply) {
+    return function (ctx) {
+      var previous = owner;
+      var registered = false;
+      if (isObject(ctx) && typeof ctx.effect === "function") {
+        try {
+          ctx.effect(function () {
+            return function () { reclaim(id, "unmount"); };
+          }, "dsh-desktop: reclaim " + id);
+          registered = true;
+        } catch (e) {}
+      }
+      owner = id;
+      try {
+        var returned = realApply.apply(this, arguments);
+      } finally {
+        owner = previous;
+      }
+      // No effect hook available (a plugin called with a bare context): fall
+      // back to wrapping a plain-function disposer, the only shape that can be
+      // wrapped without changing what cordis collects.
+      if (!registered && (returned === undefined || typeof returned === "function")) {
+        var ownDisposer = returned;
+        return function () {
+          if (typeof ownDisposer === "function") {
+            try {
+              ownDisposer();
+            } catch (error) {
+              console.error("[dsh-desktop] cleanup of \"" + String(id) + "\" threw", error);
+            }
+          }
+          reclaim(id, "unmount");
+        };
+      }
+      return returned;
+    };
+  }
+
+  // Copy every own property descriptor (getters included — bundlers define
+  // exports as accessors) onto a fresh object, with one key overridden.
+  function cloneWith(source, key, value) {
+    var out = Object.create(Object.getPrototypeOf(source) || Object.prototype);
+    var keys = Object.getOwnPropertyNames(source).concat(Object.getOwnPropertySymbols(source));
+    keys.forEach(function (name) {
+      if (name === key) return;
+      try {
+        Object.defineProperty(out, name, Object.getOwnPropertyDescriptor(source, name));
+      } catch (e) {}
+    });
+    Object.defineProperty(out, key, {
+      value: value, enumerable: true, configurable: true, writable: true
+    });
+    return out;
+  }
+
+  // A plugin may be a bare function (`module.exports = function (ctx) {}`) rather
+  // than an `{ apply }` object. Classes are deliberately left alone: cordis
+  // instantiates those with `new`, which a plain wrapper cannot stand in for.
+  function instrumentFunctionPlugin(id, fn) {
+    var wrapped = instrumentApply(id, fn);
+    Object.getOwnPropertyNames(fn).forEach(function (key) {
+      if (key === "length" || key === "name" || key === "prototype") return;
+      try {
+        Object.defineProperty(wrapped, key, Object.getOwnPropertyDescriptor(fn, key));
+      } catch (e) {}
+    });
+    return wrapped;
+  }
+
+  // Install the wrapper on whichever object carries `apply`. In-place patching
+  // is preferred so the exports object keeps its identity (cordis keys a
+  // plugin's runtime on the `apply` function it resolves, and reads
+  // `name`/`inject`/`Config` off the same object). Bundled plugins often expose
+  // `apply` as a getter with no setter, where the assignment cannot stick — those
+  // get a descriptor-preserving copy instead.
+  function instrumentExports(id, exports) {
+    var nested = false;
+    var target = exports;
+    if (isObject(target) && typeof target.apply !== "function"
+      && isObject(target.default) && typeof target.default.apply === "function") {
+      target = target.default;
+      nested = true;
+    }
+    if (typeof target !== "function" && isObject(exports) && typeof exports.default === "function") {
+      target = exports.default;
+      nested = true;
+    }
+    if (typeof target === "function" && !/^class[\s{]/.test(String(target))) {
+      if (target.__dshInstrumented === true) return exports;
+      var wrappedFn = instrumentFunctionPlugin(id, target);
+      wrappedFn.__dshInstrumented = true;
+      instrumented.add(id);
+      return nested ? cloneWith(exports, "default", wrappedFn) : wrappedFn;
+    }
+    if (!isObject(target) || typeof target.apply !== "function") return exports;
+    if (target.__dshInstrumented === true) return exports;
+    var wrapped = instrumentApply(id, target.apply);
+    try {
+      target.apply = wrapped;
+      target.__dshInstrumented = true;
+    } catch (e) {}
+    if (target.apply === wrapped) {
+      instrumented.add(id);
+      return exports;
+    }
+    var copy = cloneWith(target, "apply", wrapped);
+    copy.__dshInstrumented = true;
+    instrumented.add(id);
+    return nested ? cloneWith(exports, "default", copy) : copy;
+  }
+
+  function instrumentFactory(id, factory) {
+    if (typeof factory !== "function") return factory;
+    return function (require) {
+      return instrumentExports(id, factory.apply(this, arguments));
+    };
+  }
+
+  patchDom();
+  patchAsync();
+
   // ---------------------------------------------------------------- __DSH_BOOT__
   var bootSlot = undefined;
   Object.defineProperty(window, "__DSH_BOOT__", {
@@ -65,6 +469,16 @@
   }
 
   // ------------------------------------------------------------ __ModuleLoader__
+  // DSH injects the facade inline at serve time as a plain object:
+  //   { mode:"queue", pendingQueue:[], load(r){...}, create(opts){...} }
+  // Boot calls `moduleLoader.create(...)` (so `create` MUST survive), and the
+  // ClientModuleSystem constructor later reassigns `mode`/`load` on the SAME
+  // object. The old wrapper returned a load-only stub `{load}`, which dropped
+  // `create` → "i.create is not a function" → "Failed to load plugins".
+  // A Proxy forwards every property (create/mode/pendingQueue, plus the
+  // constructor's reassignments) to the real facade and only intercepts `load`
+  // to capture client plugin factories for desktop bookkeeping.
+  var wrappedLoaders = new WeakMap();
   var loaderSlot = undefined;
   Object.defineProperty(window, "__ModuleLoader__", {
     configurable: true,
@@ -78,16 +492,60 @@
   });
 
   function wrapLoader(real) {
-    if (!isObject(real) || real.__dshDesktopWrapped) return real;
-    var proxy = {
-      __dshDesktopWrapped: true,
-      load: function (handoff) {
-        if (isObject(handoff) && typeof handoff.id === "string") {
-          factories.set(handoff.id, handoff.factory);
+    if (!isObject(real)) return real;
+    var existing = wrappedLoaders.get(real);
+    if (existing !== undefined) return existing;
+    var proxy = new Proxy(real, {
+      get: function (target, prop, receiver) {
+        if (prop === "load") {
+          return function (handoff) {
+            if (isObject(handoff) && typeof handoff.id === "string") {
+              var id = handoff.id;
+              // DSH's own client packages are shipped with the shell and never
+              // unmounted by the desktop, so instrumenting them buys nothing and
+              // would tag hundreds of nodes. Everything else — third-party
+              // plugins and the desktop's own — goes through the wrapper.
+              if (id.indexOf("@deepseek-ai/") !== 0) {
+                handoff = Object.assign({}, handoff, {
+                  factory: instrumentFactory(id, handoff.factory)
+                });
+              }
+              factories.set(id, handoff.factory);
+            }
+            // Read target.load fresh each call: the ClientModuleSystem
+            // constructor reassigns it from queue-push to live-register after
+            // boot, and we must invoke whichever is current. For the live
+            // arrow function the .call receiver is a no-op, so it is safe.
+            return target.load.call(target, handoff);
+          };
         }
-        return real.load.call(real, handoff);
+        if (prop === "create") {
+          // DSH's web boot (packages/client/web/src/boot.ts) calls
+          // `moduleLoader.create({...})` once to build the ClientModuleSystem,
+          // then keeps the instance private — unlike boot.tsx, boot.ts NEVER
+          // publishes `window.__DSH_MODULES__`. Without this intercept the
+          // proxy's `modules` local stays undefined, `live` stays false, and
+          // no `added`/`rebuilt`/`removed` ever reaches the hmr plugin — so a
+          // plugin dropped into the desktop directory never mounts in the
+          // running webview. Capturing `create`'s return value is the only
+          // injection point that survives boot.ts; it mirrors how boot.tsx
+          // would have set __DSH_MODULES__. Patching modules here also flips
+          // `live` true for the state already polled before boot finished,
+          // so nothing is lost across the boot seam.
+          return function (options) {
+            var instance = target.create.call(target, options);
+            // Publish on the slot so any later reader of
+            // window.__DSH_MODULES__ sees the live instance, exactly as
+            // boot.tsx would have done. The setter runs patchModules and
+            // re-runs applyState so buffered `added` events flush.
+            try { window.__DSH_MODULES__ = instance; } catch (e) {}
+            return instance;
+          };
+        }
+        return Reflect.get(target, prop, receiver);
       }
-    };
+    });
+    wrappedLoaders.set(real, proxy);
     return proxy;
   }
 
@@ -101,6 +559,12 @@
     set: function (value) {
       modules = value;
       patchModules(value);
+      // Boot finished only after the ClientModuleSystem exists. State polled
+      // while `modules` was undefined buffered its `added` events (emit saw no
+      // listeners yet, OR applyState's `live` guard dropped them). Re-run the
+      // diff against the last polled state now that `live` is true, so those
+      // `added` events finally reach the @dsh-desktop/hmr plugin and mount.
+      if (bootSeen) applyState(lastState);
     }
   });
 
@@ -113,10 +577,14 @@
         value.desktopSetRow = function (entry) {
           if (!isObject(entry) || typeof entry.id !== "string") return;
           if (!this.graphRows) this.graphRows = new Map();
+          // Shape must match BootModuleRow after parseBootManifest: arriveGraphRow
+          // iterates row.external unconditionally, so the field is required ([] when
+          // the bundle has no dynamic package requests — the common desktop case).
           this.graphRows.set(entry.id, {
             id: entry.id,
             url: entry.url,
-            rev: entry.rev
+            rev: entry.rev,
+            external: Array.isArray(entry.external) ? entry.external.slice() : []
           });
         };
       }
@@ -165,10 +633,42 @@
       var out = [];
       known.forEach(function (entry) { out.push(entry); });
       return out;
+    },
+    // Belt-and-braces sweep for the fiber driver: the reclaim normally runs as
+    // the plugin's own last disposer, but a plugin that was mounted without
+    // going through the wrapper (or whose fiber was torn down some other way)
+    // still leaves tagged nodes behind.
+    reclaim: function (id) {
+      return reclaim(id, "sweep");
+    },
+    // Diagnostics: which plugins the shell managed to wrap. A plugin missing
+    // from this list is one whose teardown is still entirely its own business.
+    instrumented: function () {
+      var out = [];
+      instrumented.forEach(function (id) { out.push(id); });
+      return out;
+    },
+    // What the shell is currently holding for one plugin. Non-zero counts after
+    // an unmount would mean the ledger leaked; non-zero counts while mounted are
+    // simply what the plugin is using.
+    ledger: function (id) {
+      var ledger = ledgers.get(id);
+      if (ledger === undefined) return null;
+      return {
+        nodes: ledger.nodes.length,
+        timers: ledger.timers.length,
+        intervals: ledger.intervals.length,
+        frames: ledger.frames.length,
+        listeners: ledger.listeners.length,
+        closables: ledger.closables.length,
+        observers: ledger.observers.length
+      };
     }
   };
 
   // ------------------------------------------------------------- state polling
+  var lastState = undefined; // last polled /plugins/state, replayed when modules lands
+
   function sessionAllowed(entry, session) {
     if (!Array.isArray(entry.sessions) || entry.sessions.length === 0) return true;
     if (session === null || session === undefined) return false;
@@ -177,6 +677,7 @@
 
   function applyState(state) {
     if (!isObject(state) || !Array.isArray(state.entries)) return;
+    lastState = state; // remember for the post-boot replay in the modules setter
     var session = (typeof state.currentSession === "string" && state.currentSession) ? state.currentSession : null;
     currentSession = session;
 

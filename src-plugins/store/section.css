@@ -1,0 +1,79 @@
+/* Plugins section: compact tabs plus the configurable plugin card list.
+ * Locale-free re-derivation of ui-settings-plugins' PluginsSettingsSection
+ * module CSS, using flat dsx-sec* class names (the store plugin ships plain
+ * <style> tags, not CSS modules). Token names are preserved verbatim. */
+
+.dsx-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 760px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-sec-heading {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.dsx-sec-intro {
+  margin: 0;
+  font-size: 13px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-sec-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 22px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  margin-top: 2px;
+}
+
+.dsx-sec-tab {
+  position: relative;
+  border: 0;
+  padding: 7px 1px 9px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.dsx-sec-tab:hover,
+.dsx-sec-tab[data-active='true'] {
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-sec-tab[data-active='true']::after,
+.dsx-sec-tab:focus-visible::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--dsw-alias-label-primary);
+  content: '';
+}
+
+.dsx-sec-tab:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+  border-radius: 2px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-sec-panel {
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.dsx-sec-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--dsw-alias-label-tertiary);
+}

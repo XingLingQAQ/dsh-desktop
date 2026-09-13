@@ -8,7 +8,7 @@
 //! `Access-Control-Allow-Origin: *` and forwards the snapshot into the Tauri
 //! event system as `theme-changed`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -72,7 +72,10 @@ fn random_token() -> String {
 /// Start the bridge on an ephemeral loopback port. Reports are forwarded to
 /// `on_report` (called from the bridge's accept thread); plugin state and
 /// plugin bundles are served from the plugin manager.
-pub fn start<F>(on_report: F, plugins: Arc<PluginManager>) -> std::io::Result<Bridge>
+pub fn start<F>(
+    on_report: F,
+    plugins: Arc<PluginManager>,
+) -> std::io::Result<Bridge>
 where
     F: Fn(ThemeSnapshot) + Send + Sync + 'static,
 {
@@ -98,7 +101,14 @@ where
                     let cb = callback.clone();
                     let plugins = thread_plugins.clone();
                     std::thread::spawn(move || {
-                        handle_connection(stream, &expected, &api, &base, cb.as_ref(), &plugins)
+                        handle_connection(
+                            stream,
+                            &expected,
+                            &api,
+                            &base,
+                            cb.as_ref(),
+                            &plugins,
+                        )
                     });
                 }
                 Err(_) => continue,
@@ -126,17 +136,25 @@ fn handle_connection(
     let mut buf = Vec::with_capacity(16 * 1024);
     let mut chunk = [0u8; 8192];
     let mut header_end: Option<usize> = None;
+    let mut content_len: usize = 0;
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
-                if let Some(pos) = find_header_end(&buf) {
-                    header_end = Some(pos);
-                    break;
+                if header_end.is_none() {
+                    if let Some(pos) = find_header_end(&buf) {
+                        header_end = Some(pos);
+                        content_len = content_length(&buf[..pos]).unwrap_or(0);
+                    } else if buf.len() > 64 * 1024 {
+                        break;
+                    }
                 }
-                if buf.len() > 64 * 1024 {
-                    break;
+                if let Some(pos) = header_end {
+                    let body_start = pos + 4;
+                    if buf.len() >= body_start + content_len {
+                        break;
+                    }
                 }
             }
             Err(_) => break,
@@ -148,14 +166,21 @@ fn handle_connection(
     let request_line = lines.next().unwrap_or("");
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
-    let path = parts.next().unwrap_or("").split('?').next().unwrap_or("");
+    let raw_path = parts.next().unwrap_or("");
+    let (path, query) = match raw_path.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (raw_path, ""),
+    };
 
-    // Body: everything after the blank line.
+    // Body: exactly `Content-Length` bytes after the blank line. The read loop
+    // above keeps pulling until the declared body is complete, so a POST whose
+    // body lands in a separate TCP segment from its headers is no longer lost.
     let body = match header_end {
         Some(pos) => {
             let body_start = pos + 4;
-            if body_start < buf.len() {
-                String::from_utf8_lossy(&buf[body_start..]).into_owned()
+            let body_end = (body_start + content_len).min(buf.len());
+            if body_start < body_end {
+                String::from_utf8_lossy(&buf[body_start..body_end]).into_owned()
             } else {
                 String::new()
             }
@@ -202,20 +227,205 @@ fn handle_connection(
         let id = value.get("id").and_then(|v| v.as_str()).unwrap_or_default();
         let tarball = value.get("tarball").and_then(|v| v.as_str()).unwrap_or_default();
         match crate::registry::install(id, tarball) {
-            // The directory watcher picks the new plugin up on its next pass, so
-            // the response only reports that the files landed.
-            Ok(()) => write_json(&mut stream, &serde_json::json!({ "ok": true })),
+            // Scan immediately so the watched profile patch is rewritten before
+            // the frontend polls state (the 1s watcher would be too late).
+            Ok(()) => {
+                plugins.scan();
+                write_json(&mut stream, &serde_json::json!({ "ok": true }));
+            }
             Err(message) => write_json(&mut stream, &serde_json::json!({ "ok": false, "error": message })),
         }
     } else if method == "POST" && path == format!("{api_path}/plugins/uninstall") {
         let value = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
         let id = value.get("id").and_then(|v| v.as_str()).unwrap_or_default();
         match crate::registry::uninstall(id) {
+            Ok(()) => {
+                plugins.forget(id);
+                plugins.scan();
+                write_json(&mut stream, &serde_json::json!({ "ok": true }));
+            }
+            Err(message) => write_json(&mut stream, &serde_json::json!({ "ok": false, "error": message })),
+        }
+    } else if method == "POST" && path == format!("{api_path}/plugins/adopt") {
+        // Take over a DSH-profile bundle: copy its files into the desktop
+        // plugins directory, remove the profile dependency (pnpm), and record
+        // the takeover. The desktop scan picks the new directory up on its
+        // next pass; the profile's HMR watcher recomposes without the bundle.
+        let value = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
+        let id = value.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+        match plugins.adopt_profile_bundle(id) {
             Ok(()) => write_json(&mut stream, &serde_json::json!({ "ok": true })),
             Err(message) => write_json(&mut stream, &serde_json::json!({ "ok": false, "error": message })),
         }
+    } else if method == "POST" && path == format!("{api_path}/plugins/update") {
+        let value = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
+        let id = value.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+        let tarball = value.get("tarball").and_then(|v| v.as_str()).unwrap_or_default();
+        match crate::registry::update(id, tarball) {
+            Ok(()) => {
+                plugins.scan();
+                write_json(&mut stream, &serde_json::json!({ "ok": true }));
+            }
+            Err(message) => write_json(&mut stream, &serde_json::json!({ "ok": false, "error": message })),
+        }
+    } else if method == "POST" && path == format!("{api_path}/plugins/toggle") {
+        let value = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
+        let id = value.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let disabled = value.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        plugins.set_disabled(&id, disabled);
+        // Read back the real state — `set_disabled` no-ops for built-ins, so the
+        // echoed bool reflects the effective state rather than the requested one.
+        let actual = plugins.is_disabled(&id);
+        write_json(
+            &mut stream,
+            &serde_json::json!({ "ok": true, "disabled": actual }),
+        );
+    } else if method == "POST" && path == format!("{api_path}/native/toggle") {
+        // Toggle a NATIVE (DSH Loader) entry by writing a `disabled` override
+        // into the HMR-watched profile patch. The Loader recomposes within
+        // seconds; the frontend polls pluginInventory.list() to confirm.
+        let value = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
+        let entry_id = value
+            .get("entryId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let disabled = value.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        // `clear` drops the desktop's override instead of setting one, returning
+        // the entry to whatever the layers below say. Used to roll back an enable
+        // that did not take: leaving the override behind would make every later
+        // boot retry a plugin that already failed to start.
+        let clear = value.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
+        let outcome = if clear {
+            plugins.clear_native_override(&entry_id)
+        } else {
+            plugins.set_native_disabled(&entry_id, disabled)
+        };
+        match outcome {
+            Ok(actual) => write_json(
+                &mut stream,
+                &serde_json::json!({ "ok": true, "disabled": actual }),
+            ),
+            Err(message) => write_json(
+                &mut stream,
+                &serde_json::json!({ "ok": false, "error": message }),
+            ),
+        }
+    } else if method == "POST" && path == format!("{api_path}/plugins/config") {
+        let value = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
+        let id = value.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let values = value.get("values").cloned().unwrap_or(serde_json::json!({}));
+        plugins.set_config(&id, values);
+        write_json(&mut stream, &serde_json::json!({ "ok": true }));
+    } else if method == "GET" && path == format!("{api_path}/plugins/progress") {
+        // Polled by the store's progress dialog while an install or update POST
+        // is still in flight. `running: false` means the job already finished (or
+        // never started), which the dialog treats as "keep the last reading".
+        let id = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("id="))
+            .unwrap_or("");
+        let id = percent_decode(id);
+        let snapshot = crate::registry::progress(&id);
+        write_json(
+            &mut stream,
+            &match snapshot {
+                Some(progress) => serde_json::json!({
+                    "running": true,
+                    "phase": progress.phase,
+                    "received": progress.received,
+                    "total": progress.total,
+                }),
+                None => serde_json::json!({ "running": false }),
+            },
+        );
+    } else if method == "GET" && path == format!("{api_path}/plugins/config") {
+        // Query string is `id=<plugin id>`, percent-encoded by the frontend
+        // (`@scope/name` → `%40scope%2Fname`). Find the `id=` parameter and
+        // decode it so downstream lookups see the real id.
+        let id = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("id="))
+            .unwrap_or("");
+        let id = percent_decode(id);
+        let schema = crate::store::config_schema_for(&id);
+        let values = plugins.get_config(&id);
+        write_json(
+            &mut stream,
+            &serde_json::json!({ "schema": schema, "values": values }),
+        );
     } else if method == "GET" && path == format!("{api_path}/plugins/installed") {
-        write_json(&mut stream, &crate::store::list_installed());
+        let disabled = plugins.disabled_snapshot();
+        let migrated: HashSet<String> =
+            plugins.managed_externals().into_iter().collect();
+        write_json(&mut stream, &crate::store::list_installed(&disabled, &migrated));
+    } else if path == format!("{api_path}/skills") || path == format!("{api_path}/skills/save") || path == format!("{api_path}/skills/remove") || path == format!("{api_path}/skills/install") || path == format!("{api_path}/skills/pause") {
+        // The skill catalog and its three mutations. Skills are files under the
+        // DSH home, and the content webview has no filesystem, so the desktop
+        // owns this the same way it owns plugin installs. DSH's own filesystem
+        // provider watches these directories, so a write here reaches the live
+        // catalog without a host restart.
+        let Some(home) = plugins.backend_home() else {
+            write_json(
+                &mut stream,
+                &serde_json::json!({ "ok": false, "error": "DSH home 未设置" }),
+            );
+            return;
+        };
+        let action = if method == "GET" && path.ends_with("/skills") {
+            Some(crate::skills::list(&home))
+        } else if method == "POST" && path.ends_with("/skills/save") {
+            match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(value) => Some(match crate::skills::save(&home, &value) {
+                    Ok(result) => result,
+                    Err(message) => serde_json::json!({ "ok": false, "error": message }),
+                }),
+                Err(error) => Some(serde_json::json!({ "ok": false, "error": format!("请求无效: {error}") })),
+            }
+        } else if method == "POST" && path.ends_with("/skills/install") {
+            match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(value) => Some(match crate::skills::install(&home, &value) {
+                    Ok(result) => result,
+                    Err(message) => serde_json::json!({ "ok": false, "error": message }),
+                }),
+                Err(error) => Some(serde_json::json!({ "ok": false, "error": format!("请求无效: {error}") })),
+            }
+        } else if method == "POST" && path.ends_with("/skills/pause") {
+            match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(value) => Some(match crate::skills::set_paused(&home, &value) {
+                    Ok(result) => result,
+                    Err(message) => serde_json::json!({ "ok": false, "error": message }),
+                }),
+                Err(error) => Some(serde_json::json!({ "ok": false, "error": format!("请求无效: {error}") })),
+            }
+        } else if method == "POST" && path.ends_with("/skills/remove") {
+            match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(value) => Some(match crate::skills::remove(&home, &value) {
+                    Ok(result) => result,
+                    Err(message) => serde_json::json!({ "ok": false, "error": message }),
+                }),
+                Err(error) => Some(serde_json::json!({ "ok": false, "error": format!("请求无效: {error}") })),
+            }
+        } else {
+            None
+        };
+        match action {
+            Some(result) => write_json(&mut stream, &result),
+            None => {
+                stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n").ok();
+            }
+        }
+    } else if method == "GET" && path == format!("{api_path}/plugins/external") {
+        // DSH-profile bundles (`dsh plugin --profile web add …`) not yet taken
+        // over by the desktop. Read straight from the profile directory; the
+        // response drives the 「未迁移插件」 group in the manager UI.
+        let home = plugins.backend_home();
+        match crate::registry::scan_profile_bundles(home.as_deref(), "web") {
+            Ok(list) => write_json(&mut stream, &list),
+            Err(message) => {
+                write_json(&mut stream, &serde_json::json!({ "ok": false, "error": message }))
+            }
+        }
     } else if method == "GET" || method == "HEAD" {
         if path == "/plugins/state" {
             let state_handle = plugins.state();
@@ -305,6 +515,51 @@ fn write_not_found(stream: &mut TcpStream) {
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// Parse a `Content-Length: N` header (case-insensitive) from the header block.
+/// Returns 0 when absent, which makes the body collector stop at the header end
+/// — the same behavior the old read loop fell back to.
+fn content_length(headers: &[u8]) -> Option<usize> {
+    let text = std::str::from_utf8(headers).ok()?;
+    let lower = text.to_ascii_lowercase();
+    for line in lower.split("\r\n") {
+        if let Some(rest) = line.strip_prefix("content-length:") {
+            return rest.trim().parse::<usize>().ok();
+        }
+    }
+    None
+}
+
+/// Percent-decode a query-string value: turn `%XX` sequences back into bytes,
+/// leave everything else (including `+`) as-is. Matches `decodeURIComponent`
+/// semantics, which is what the frontend sends. Malformed `%` (trailing or
+/// non-hex) is left literally rather than failing.
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

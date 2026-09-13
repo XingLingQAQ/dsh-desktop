@@ -1,0 +1,96 @@
+# 打 tag 即发版：构建 Windows 安装包、签名、创建 Release，并把更新清单
+# latest.json 一起挂上去。
+#
+# 发布前需要仓库里配好一个 Secret：
+#   TAURI_SIGNING_PRIVATE_KEY = src-tauri/updater-signing.key 的内容
+# 这个私钥是更新功能的前提——它签出的包才能被客户端的内置公钥校验通过。
+# 私钥只在这台机器和这个 Secret 里，丢了就再也发不出能被识别的更新。
+# 本地手动打包时同样需要它（`createUpdaterArtifacts` 一开，签名就是必需步骤）：
+#   TAURI_SIGNING_PRIVATE_KEY=src-tauri/updater-signing.key npm run tauri build
+#
+# tag 必须与 src-tauri/tauri.conf.json 的 version 一致：更新清单里的版本号取自
+# 那个文件而不是 tag，两者不一致会导致发出去的清单声称一个错的版本。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # 发布失败后重跑用：tag 已经存在，直接指定它。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（必须已存在）"
+        required: true
+
+# 创建 Release 与上传资产需要写权限。
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: 取出源码
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: 核对 tag 与版本号
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          cargo=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "tag=$tag  tauri.conf.json=$version  package.json=$pkg  Cargo.toml=$cargo"
+          # 这里失败而不是警告：清单里的版本来自 tauri.conf.json，tag 对不上就等于
+          # 发一个版本号与 tag 不符的更新，客户端会按错的版本判断新旧。
+          if [ "${tag#v}" != "$version" ]; then
+            echo "::error::tag $tag 与 tauri.conf.json 的 version $version 不一致，先改版本号再打 tag"
+            exit 1
+          fi
+          [ "$pkg" = "$version" ] || echo "::warning::package.json 的 $pkg 与 $version 不一致"
+          [ "$cargo" = "$version" ] || echo "::warning::Cargo.toml 的 $cargo 与 $version 不一致"
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建产物
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 构建并发布
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "DSH Desktop ${{ github.event.inputs.tag || github.ref_name }}"
+          # 非草稿：更新清单必须挂在已发布的 Release 上才拉得到。
+          releaseDraft: false
+          # 带 `-` 的版本（0.1.0-rc.1 这种）标成预发布。注意 GitHub 的
+          # /releases/latest/ 会跳过预发布，所以内置清单地址对预发布版本无效，
+          # 那种情况下要把 /releases/download/<tag>/latest.json 填进设置的「更新源」。
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
+          # 发布说明由 GitHub 依据提交生成：它会进入更新清单，客户端在更新面板里显示。
+          generateReleaseNotes: true
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          retryAttempts: 2

@@ -1,0 +1,389 @@
+/* The composer's usage control: a gauge in the tool row and the analysis
+ * popover it opens.
+ *
+ * The gauge replaces the shipped context ring — the client half marks that
+ * ring, and the one rule below takes it out of the row so the composer keeps a
+ * single usage affordance. The marker is an attribute this plugin sets, not a
+ * hashed class name, so a harness update that renames modules moves nothing
+ * here. */
+
+/* Gated on the replacement being on the page: if this plugin's control never
+ * mounts — the slot is gone, or the panel failed — the shipped ring stays,
+ * rather than the composer losing its only way to read context usage. */
+body:has(.dsx-ctx) [data-dsx-context-ring] {
+  display: none !important;
+}
+
+.dsx-ctx {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* The same 28px circular hit target as the composer's other tool-row icons. */
+.dsx-ctx-trigger {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.dsx-ctx-trigger:hover,
+.dsx-ctx-trigger[aria-expanded="true"] {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-ctx-trigger:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+.dsx-ctx-track {
+  fill: none;
+  stroke: var(--dsw-alias-border-l3);
+  stroke-width: 2;
+}
+
+.dsx-ctx-arc {
+  fill: none;
+  stroke: var(--dsx-ctx-tone, var(--dsw-alias-brand-primary));
+  stroke-width: 2;
+  stroke-linecap: round;
+  /* The arc redraws as tokens land, so the length eases rather than jumps. */
+  transition: stroke 0.2s ease, stroke-dasharray 0.45s ease;
+}
+
+.dsx-ctx-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 100;
+  box-sizing: border-box;
+  width: 352px;
+  max-height: min(70vh, 540px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--dsw-alias-border-inverted);
+  border-radius: 14px;
+  background: var(--dsw-specific-menu);
+  box-shadow: var(--dsw-shadow-lv3);
+  font-size: var(--dsw-font-xs-13-font-size);
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary);
+  cursor: default;
+  scrollbar-width: thin;
+  scrollbar-color: var(--dsw-alias-border-l3) transparent;
+  animation: dsx-ctx-in 0.14s ease-out;
+}
+
+@keyframes dsx-ctx-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.dsx-ctx-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.dsx-ctx-panel::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--dsw-alias-border-l3);
+  background-clip: padding-box;
+}
+
+.dsx-ctx-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dsx-ctx-panel,
+  .dsx-ctx-spin {
+    animation: none;
+  }
+  .dsx-ctx-arc,
+  .dsx-ctx-seg,
+  .dsx-ctx-toolFill {
+    transition: none;
+  }
+}
+
+.dsx-ctx-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.dsx-ctx-title {
+  flex: none;
+  font-size: var(--dsw-font-s-strong-14-font-size);
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-ctx-stamp {
+  /* The header is one line by construction: the title and the controls are
+   * fixed, and the stamp is the only part allowed to give up room. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A 22px ghost capsule for the popover's own controls. */
+.dsx-ctx-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.dsx-ctx-icon:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-ctx-icon:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.dsx-ctx-icon[data-copied="true"] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+/* The header's controls sit together at the far end, as one group. */
+.dsx-ctx-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.dsx-ctx-spin {
+  display: inline-grid;
+  place-items: center;
+  color: var(--dsw-alias-label-tertiary);
+  animation: dsx-ctx-rotate 0.9s linear infinite;
+}
+
+@keyframes dsx-ctx-rotate {
+  to { transform: rotate(360deg); }
+}
+
+/* Occupancy headline: the reading leads, the absolute pair trails it. */
+.dsx-ctx-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.dsx-ctx-percent {
+  font-size: var(--dsw-font-m-18-font-size);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsx-ctx-tone, var(--dsw-alias-label-primary));
+}
+
+.dsx-ctx-headLabel {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-ctx-figures {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-ctx-bar {
+  display: flex;
+  gap: 1px;
+  height: 6px;
+  margin: 8px 0 10px;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  overflow: hidden;
+}
+
+.dsx-ctx-seg {
+  min-width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--dsx-ctx-tone);
+  transition: width 0.45s ease, background 0.2s ease;
+}
+
+.dsx-ctx-legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 12px;
+  margin: 0 0 4px;
+}
+
+.dsx-ctx-legendRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dsx-ctx-swatch {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--dsx-ctx-tone);
+}
+
+.dsx-ctx-legendLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-ctx-legendValue {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsx-ctx-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+
+.dsx-ctx-sectionTitle {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-ctx-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+}
+
+.dsx-ctx-cell {
+  min-width: 0;
+}
+
+.dsx-ctx-cellLabel {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-ctx-cellValue {
+  display: block;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-ctx-cellValue[data-tone="bad"] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsx-ctx-tool {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.dsx-ctx-toolName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsx-ctx-toolTrack {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  overflow: hidden;
+}
+
+.dsx-ctx-toolFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--dsx-ctx-tone, var(--dsw-static-blue-500));
+  transition: width 0.35s ease;
+}
+
+.dsx-ctx-toolCount {
+  font-variant-numeric: tabular-nums;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-ctx-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dsx-ctx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsx-ctx-chipValue {
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-ctx-note {
+  margin: 6px 0 0;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-ctx-empty {
+  padding: 6px 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-ctx-error {
+  margin: 8px 0 0;
+  color: var(--dsw-alias-state-error-primary);
+}

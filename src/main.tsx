@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { DeepSeekLogo } from "./components/DeepSeekLogo";
+import { UpdatePanel } from "./components/UpdatePanel";
 import { applyTheme, type ThemeSnapshot } from "./theme";
 import "./styles.css";
 
@@ -15,6 +16,9 @@ type AppSettings = {
   close_to_tray: boolean;
   auto_start: boolean;
   workspace_folder: string | null;
+  update_endpoint: string | null;
+  harness_channel: string | null;
+  update_pubkey: string | null;
 };
 
 const STATUS_TEXT: Record<HostStatus, string> = {
@@ -96,9 +100,13 @@ function Shell() {
     close_to_tray: false,
     auto_start: false,
     workspace_folder: null,
+    update_endpoint: null,
+    harness_channel: null,
+    update_pubkey: null,
   });
   const [exportPath, setExportPath] = useState<string | null>(null);
-  const [settingsTab, setSettingsTab] = useState<"general" | "diagnostics">("general");
+  const [settingsTab, setSettingsTab] = useState<"general" | "update" | "diagnostics">("general");
+  const [appVersion, setAppVersion] = useState("");
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const [currentDir, setCurrentDir] = useState("C:\\\\");
   const [dirEntries, setDirEntries] = useState<Array<{ name: string; path: string; is_dir: boolean }>>([]);
@@ -152,6 +160,9 @@ function Shell() {
     let disposed = false;
     void invoke<AppSettings>("get_settings").then((s) => {
       if (!disposed) setSettings(s);
+    });
+    void invoke<string>("get_app_version").then((v) => {
+      if (!disposed) setAppVersion(v);
     });
     const un = listen("open-settings", () => {
       if (!disposed) setSettingsOpen(true);
@@ -222,9 +233,11 @@ function Shell() {
           <span className="brand-title" data-tauri-drag-region>
             DeepSeek Harness
           </span>
-          <span className="brand-version" data-tauri-drag-region>
-            v0.1.0-rc.5
-          </span>
+          {appVersion !== "" && (
+            <span className="brand-version" data-tauri-drag-region>
+              v{appVersion}
+            </span>
+          )}
         </div>
         <div className="spacer" data-tauri-drag-region />
         <div className={`status ${status}`}>
@@ -254,6 +267,7 @@ function Shell() {
             </div>
             <div className="settings-tabs">
               <button className={settingsTab === "general" ? "active" : ""} onClick={() => setSettingsTab("general")}>通用</button>
+              <button className={settingsTab === "update" ? "active" : ""} onClick={() => setSettingsTab("update")}>更新</button>
               <button className={settingsTab === "diagnostics" ? "active" : ""} onClick={() => setSettingsTab("diagnostics")}>诊断</button>
             </div>
             {settingsTab === "general" && (
@@ -288,6 +302,12 @@ function Shell() {
                   <button className="folder-browse" onClick={() => void openFolderPicker()}>浏览</button>
                 </div>
               </>
+            )}
+            {settingsTab === "update" && (
+              <UpdatePanel
+                settings={settings}
+                onSettings={(patch) => setSettings((current) => ({ ...current, ...patch }))}
+              />
             )}
             {settingsTab === "diagnostics" && (
               <>

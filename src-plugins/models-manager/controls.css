@@ -1,0 +1,130 @@
+/* Shared controls (see controls.tsx), styled from the `--dsw-*` tokens only so
+ * they follow the app theme with no local light/dark branching.
+ *
+ * The trigger mirrors the platform's `Input` geometry — 32px, 8px radius, 14px
+ * type — because both callers put it among those fields and a dropdown that is
+ * a different size reads as a different kind of control. `dense` is that same
+ * control at the MCP form's tighter scale.
+ */
+
+/* Icon button: the platform's 28px ghost capsule, squared off. */
+.dsx-iconButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.dsx-iconButton:hover:not([aria-disabled="true"]) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The unavailable state is `aria-disabled`, not `disabled` — see controls.tsx —
+   so the ring has to be written for a button that still takes focus. */
+.dsx-iconButton:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+.dsx-iconButton[data-tone="accent"] {
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-iconButton[data-tone="danger"] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsx-iconButton[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dsx-choice {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px 0 10px;
+  font: inherit;
+  font-size: var(--dsw-font-s-14-font-size);
+  line-height: 22px;
+  text-align: left;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.dsx-choice:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsx-choice:focus-visible {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.dsx-choice:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.dsx-choiceLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsx-choiceChevron {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The MCP form's scale: monospace 12px, on the same 28px line the icon buttons
+   at the end of a field row stand on, so every control in a row shares one
+   baseline whatever kind of control it is. */
+.dsx-choice[data-variant="dense"] {
+  height: 28px;
+  padding: 0 8px;
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-xxs-12-font-size);
+  line-height: 1;
+  border-radius: 6px;
+}
+
+/*
+ * The face that stands in for an adopted native <select> (see NativeSelects).
+ * It sits in the select's own parent at the select's box, so the panel's
+ * clipping, its scrolling and any hiding of the surrounding tab all apply to it
+ * the way they apply to the select.
+ */
+.dsx-selectFaceHost {
+  position: absolute;
+  z-index: 1;
+}
+
+/* The Menu's own wrapper span, stretched to the face's box. */
+.dsx-choiceFill {
+  display: flex;
+  width: 100%;
+  height: 100%;
+}
+
+.dsx-choiceFill > .dsx-choice {
+  height: 100%;
+}

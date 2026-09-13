@@ -186,6 +186,58 @@ fn ensure_dsh(snapshot: &EnvironmentSnapshot, log: &dyn Fn(String)) -> Result<St
     Ok(cli.to_string_lossy().into_owned())
 }
 
+/// Install (or replace) the harness at a pinned version under this desktop's own
+/// runtime, and return the new CLI entry.
+///
+/// Updates go here rather than into the official launcher's `harness-versions`
+/// tree: that tree belongs to `dsh.exe`, and replacing one of its revisions
+/// would leave the launcher's manifest describing a bundle that is no longer
+/// there. `discover()` prefers this copy once it exists, so picking a version
+/// here is what makes it the one that runs.
+pub fn install_dsh_version(
+    snapshot: &EnvironmentSnapshot,
+    version: &str,
+    log: &dyn Fn(String),
+) -> Result<String, String> {
+    let npm_cli = snapshot
+        .npm_cli
+        .clone()
+        .ok_or_else(|| "npm 不可用，无法安装更新".to_string())?;
+    let node = snapshot
+        .node
+        .clone()
+        .ok_or_else(|| "node 不可用，无法安装更新".to_string())?;
+    let prefix = runtime_root().join("dsh");
+    let package = format!("@deepseek-ai/dsh@{version}");
+
+    log(format!("安装 DeepSeek Harness {version}…"));
+    run_logged(
+        log,
+        &node,
+        &[
+            &npm_cli,
+            "install",
+            "--prefix",
+            prefix.to_str().unwrap_or(""),
+            &package,
+            "--registry",
+            NPM_REGISTRY,
+        ],
+    )?;
+
+    let cli = prefix
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("lib")
+        .join("bin.js");
+    if !cli.is_file() {
+        return Err(format!("安装 {version} 后未找到 bin.js"));
+    }
+    log(format!("安装完成: {}", cli.display()));
+    Ok(cli.to_string_lossy().into_owned())
+}
+
 /// Provision every missing piece. Each step logs to the splash. On success the
 /// returned snapshot has all fields filled (caller should refresh()).
 pub fn provision(

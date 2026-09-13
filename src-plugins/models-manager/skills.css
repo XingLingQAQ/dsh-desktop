@@ -1,0 +1,572 @@
+/* Skills tab: installed catalog, editor dialog, and store.
+ *
+ * Colors come from the `--dsw-alias-*` / `--dsw-font-*` tokens DSH publishes,
+ * and type sizes from the `--dsw-font-*` ramps rather than raw px, so the tab
+ * follows the app's theme (including its dark mode) without any local
+ * light/dark branching. Every token used here was read off the live sheet.
+ *
+ * The tab shares its geometry with mcp.css next door — one header row with the
+ * actions at the far end, one card list in between — so the two tabs read as
+ * two views of the same product rather than two designs.
+ *
+ * Buttons and dialogs are NOT styled here: they are the platform's own
+ * `Button` / `Modal`, so they carry the app's geometry and states. What is
+ * left below is the layout the platform has no opinion about.
+ */
+
+.dsx-skills-container {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 760px;
+}
+
+.dsx-skills-loading {
+  padding: 28px;
+  text-align: center;
+  font-size: var(--dsw-font-xs-13-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-skills-error {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-state-error-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-state-error-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dsx-skills-error p {
+  margin: 0;
+}
+
+.dsx-skills-errorInline {
+  margin: 0;
+  font-size: var(--dsw-font-xs-13-font-size);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsx-skills-description {
+  margin: 0;
+  font-size: var(--dsw-font-xs-13-font-size);
+  line-height: 1.7;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ── header: the view switch + the import actions ───────────────────────── */
+
+.dsx-skills-viewswitch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* Pushes the action icons to the right end of the header. */
+.dsx-skills-viewFiller {
+  flex: 1;
+}
+
+/* The two views, and only the two views: the actions beside them are buttons,
+   not tabs, so they stay outside the tablist. */
+.dsx-skills-viewtabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* A pill, not an underline: the two views are a mode switch, and the active
+   one reads as set rather than as one more item in a tab strip. */
+.dsx-skills-viewtab {
+  padding: 4px 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary);
+  font-family: inherit;
+  font-size: var(--dsw-font-xs-13-font-size);
+  line-height: 20px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dsx-skills-viewtab:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-skills-viewtab[data-active="true"] {
+  background: var(--dsw-alias-state-business-secondary);
+  color: var(--dsw-alias-brand-primary);
+}
+
+/* The pills carry no border to colour, so the keyboard's focus has to be drawn
+   on top of them — same ring the section's own tabs use. */
+.dsx-skills-viewtab:focus-visible,
+.dsx-skills-sourceChip:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+/*
+ * Destructive actions have no platform variant, so they borrow the error
+ * token. The class is doubled because `Button`'s own single-class rules come
+ * from a stylesheet this bundle does not control the order of; doubled, the
+ * colour wins wherever the link lands.
+ */
+.dsx-skills-danger.dsx-skills-danger {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsx-skills-danger.dsx-skills-danger:hover:not(:disabled) {
+  background: var(--dsw-alias-state-error-secondary);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsx-skills-dangerFill.dsx-skills-dangerFill {
+  background: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-label-primary-foreground);
+}
+
+.dsx-skills-dangerFill.dsx-skills-dangerFill:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+/* Source picker: a wrapping row of chips, above the store's list. */
+.dsx-skills-sourceRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.dsx-skills-sourceChip {
+  padding: 4px 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary);
+  font-family: inherit;
+  font-size: var(--dsw-font-xs-13-font-size);
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.dsx-skills-sourceChip:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-skills-sourceChip[data-active="true"] {
+  background: var(--dsw-alias-state-business-secondary);
+  color: var(--dsw-alias-brand-primary);
+}
+
+.dsx-skills-sourceNote {
+  margin: 0 0 10px;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-skills-sourceLink {
+  color: var(--dsw-alias-brand-primary);
+  text-decoration: none;
+}
+
+.dsx-skills-sourceLink:hover {
+  text-decoration: underline;
+}
+
+/* ── empty / list / cards ────────────────────────────────────────────────── */
+
+.dsx-skills-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 44px 24px;
+  text-align: center;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+}
+
+.dsx-skills-empty p {
+  margin: 0;
+}
+
+/* The same mark the cards lead with, so an empty list still reads as this
+   page's list rather than as a missing component. */
+.dsx-skills-emptyMark {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 4px;
+  border-radius: 12px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-m-18-font-size);
+  font-weight: 600;
+  user-select: none;
+}
+
+.dsx-skills-emptyTitle {
+  font-size: var(--dsw-font-s-14-font-size);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-skills-emptyHint {
+  font-size: var(--dsw-font-xs-13-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-skills-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dsx-skills-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  transition: border-color 0.15s ease;
+}
+
+.dsx-skills-card:hover {
+  border-color: var(--dsw-alias-border-l3);
+}
+
+/* The card's fixed mark: one character of the skill's own name, tinted by
+   where it came from. It gives every row the same left edge, which is what
+   makes a long list scannable. */
+.dsx-skills-glyph {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-s-strong-14-font-size);
+  font-weight: 600;
+  user-select: none;
+}
+
+.dsx-skills-glyph[data-source="user"],
+.dsx-skills-glyph[data-source="catalog"] {
+  background: var(--dsw-alias-state-business-secondary);
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.dsx-skills-glyph[data-source="agents"] {
+  background: var(--dsw-alias-state-success-secondary);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.dsx-skills-cardMain {
+  flex: 1;
+  min-width: 0;
+}
+
+.dsx-skills-cardHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dsx-skills-cardTitle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.dsx-skills-cardActions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dsx-skills-skillName {
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-s-strong-14-font-size);
+  font-weight: var(--dsw-font-s-strong-14-font-weight);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Where a skill came from: a dot in its own colour and a hairline pill, rather
+   than the solid fill the badges used — one card can carry several of these,
+   and filled ones turn the header into a colour chart. */
+.dsx-skills-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px 1px 7px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+
+.dsx-skills-sourceDot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-skills-sourceDot[data-source="user"],
+.dsx-skills-sourceDot[data-source="catalog"] {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.dsx-skills-sourceDot[data-source="agents"] {
+  background: var(--dsw-alias-state-success-primary);
+}
+
+.dsx-skills-badge {
+  padding: 1px 8px;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  line-height: 16px;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+
+.dsx-skills-badge[data-flag="installed"] {
+  background: var(--dsw-alias-state-success-secondary);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-skills-badge[data-flag="paused"] {
+  background: var(--dsw-alias-state-warn-secondary);
+  color: var(--dsw-alias-state-warn-label);
+}
+
+/*
+ * A paused skill is out of the catalog but not gone, so the card stays where it
+ * is and reads as inert rather than disappearing — the way back has to be as
+ * visible as the way out.
+ */
+.dsx-skills-card[data-paused="true"] {
+  opacity: 0.72;
+}
+
+.dsx-skills-card[data-paused="true"] .dsx-skills-skillName {
+  text-decoration: line-through;
+  text-decoration-color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-skills-pausedHint {
+  margin: 6px 0 0;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* One-line receipt for an action whose result is not on screen (an import). */
+.dsx-skills-saved {
+  margin: 0;
+  font-size: var(--dsw-font-xs-13-font-size);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+/* ── file inventory ──────────────────────────────────────────────────────── */
+
+.dsx-skills-files {
+  margin-top: 8px;
+}
+
+.dsx-skills-files > summary {
+  cursor: pointer;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+  list-style: none;
+}
+
+.dsx-skills-files > summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 12px;
+}
+
+.dsx-skills-files[open] > summary::before {
+  content: '▾';
+}
+
+.dsx-skills-files > summary:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-skills-fileList {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  list-style: none;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  /* The biggest skill here is 148 files; this is the ceiling that keeps a card
+     from taking over the page. */
+  max-height: 220px;
+  overflow-y: auto;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l1);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l1);
+}
+
+/* In the import dialog the list follows descriptive text rather than a card. */
+.dsx-skills-fileListScroll {
+  max-height: 260px;
+}
+
+.dsx-skills-fileList li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dsx-skills-filePath {
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+
+.dsx-skills-fileSize {
+  flex: none;
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.dsx-skills-cardDescription {
+  margin: 6px 0 0;
+  font-size: var(--dsw-font-xs-13-font-size);
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* Everything about a card that is true of it rather than about its state: the
+   folder it lives in, how big it is, whether the model can call it. Set apart
+   by a hairline so it reads as a footer rather than as a second paragraph. */
+.dsx-skills-cardMeta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-skills-cardPath {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--dsw-font-markdown-code-font-family);
+  color: var(--dsw-alias-label-dimmed);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsx-skills-metaItem {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* ── dialog bodies ───────────────────────────────────────────────────────── */
+
+/*
+ * The platform dialog is a fixed-width card with no height ceiling, so a form
+ * this tall would run off the top of the viewport. Widened, and the form gets
+ * the height cap and the scroll instead of the whole card — the title and the
+ * footer buttons stay put while the fields move. The width gives way on a
+ * narrow window, the same guard the MCP dialog uses.
+ *
+ * Class doubled for the same reason as the danger button above: the platform's
+ * `.dialog` rule carries equal specificity and this bundle cannot know which
+ * stylesheet the browser sees last.
+ */
+.dsx-skills-dialog.dsx-skills-dialog {
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.dsx-skills-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: min(56vh, 460px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.dsx-skills-form p {
+  margin: 0;
+}
+
+.dsx-skills-confirmPath {
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+  overflow-wrap: anywhere;
+}
+
+/* The custom catalog's address bar: one field wide enough for a URL, set off
+   from the chips above and the list below. */
+.dsx-skills-catalogBar {
+  display: flex;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+/* Matches the platform `Input` atom: same height, radius, fill and border. */
+.dsx-skills-input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0 10px;
+  min-height: 32px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: var(--dsw-font-s-14-font-size);
+  line-height: 22px;
+  resize: vertical;
+}
+
+.dsx-skills-input::placeholder {
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.dsx-skills-input:focus {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary);
+}

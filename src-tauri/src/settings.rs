@@ -17,6 +17,15 @@ pub struct AppSettings {
     pub auto_start: bool,
     /// Last selected workspace folder (custom picker).
     pub workspace_folder: Option<String>,
+    /// HTTPS address of this desktop's own release manifest (Tauri format). The
+    /// shell ships without a release host, so this is set by hand until one
+    /// exists; empty means the shell update check reports itself unconfigured.
+    pub update_endpoint: Option<String>,
+    /// npm dist-tag the harness update check follows (`latest` / `next`).
+    pub harness_channel: Option<String>,
+    /// minisign public key shell updates are verified against. Empty means the
+    /// key compiled into this build.
+    pub update_pubkey: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -25,6 +34,9 @@ impl Default for AppSettings {
             close_to_tray: false,
             auto_start: false,
             workspace_folder: None,
+            update_endpoint: None,
+            harness_channel: None,
+            update_pubkey: None,
         }
     }
 }

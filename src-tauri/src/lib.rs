@@ -12,11 +12,14 @@
 mod bridge;
 mod discover;
 mod host;
+mod plugin_state;
 mod plugins;
 mod provision;
 mod registry;
 mod settings;
+mod skills;
 mod store;
+mod update;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,8 +30,9 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::{
     tray::TrayIconBuilder,
-    webview::Color, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, Url, WebviewBuilder,
-    WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    webview::{Color, NewWindowResponse},
+    Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, Url, WebviewBuilder, WebviewUrl,
+    WebviewWindowBuilder, WindowEvent,
 };
 
 use crate::bridge::Bridge;
@@ -37,6 +41,7 @@ use crate::plugins::PluginManager;
 use crate::settings::AppSettings;
 use crate::host::{http_get_ok, probe_existing, HostEvent, HostProcess};
 use crate::provision::provision;
+use crate::update::{check_updates, install_client_update, install_harness_update};
 
 /// Height of the custom title bar in the shell page (must match `--titlebar-height`).
 const TITLEBAR_HEIGHT: f64 = 46.0;
@@ -140,6 +145,49 @@ fn set_workspace_folder(
     Ok(settings.clone())
 }
 
+/// Persist the update configuration. Empty strings clear a field rather than
+/// storing blanks, so `Option::is_none` keeps meaning "not set".
+#[tauri::command]
+fn set_update_settings(
+    state: tauri::State<Arc<Mutex<AppSettings>>>,
+    endpoint: String,
+    channel: String,
+    pubkey: String,
+) -> Result<AppSettings, String> {
+    let trimmed = |value: String| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    };
+    let mut settings = state.lock().unwrap();
+    settings.update_endpoint = trimmed(endpoint);
+    settings.harness_channel = trimmed(channel);
+    settings.update_pubkey = trimmed(pubkey);
+    settings::save(&settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+/// Version this build reports, from tauri.conf.json — the number the update
+/// check compares against, so the title bar and the updater cannot disagree.
+#[tauri::command]
+fn get_app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+/// Restart the shell so a version just installed is the one that comes up.
+///
+/// The host process we spawned is killed first: left alive it would outlive the
+/// shell, and the next launch would find it answering on its port and attach to
+/// it — running the very version the user just replaced.
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    if let Some(slot) = app.try_state::<SharedHost>() {
+        if let Some(mut process) = slot.lock().unwrap().take() {
+            process.kill();
+        }
+    }
+    app.request_restart()
+}
+
 /// Export a diagnostics report to `%APPDATA%\dsh-desktop\diagnostics`.
 #[tauri::command]
 fn export_diagnostics(
@@ -194,10 +242,37 @@ fn export_diagnostics(
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// 排空 host 进程事件通道里开机之后积压的 stdout/stderr 行。
+///
+/// 开机就绪循环拿到 Ready 行后就退出,此后 host 的所有输出(含 cordis HMR
+/// 热挂/热卸触发的插件 apply()/dispose 日志)一直堆在 mpsc 通道里没人取,
+/// `export_diagnostics` 只读 `launch.log` 环形缓冲,自然看不到这些行。
+/// 本命令排空通道并返回积压内容,用于核实 fiber 级热暂停/热加载是否真的发生。
+#[tauri::command]
+fn drain_host_log(host: tauri::State<SharedHost>) -> Vec<String> {
+    let mut slot = host.lock().unwrap();
+    let Some(process) = slot.as_mut() else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    loop {
+        match process.try_event() {
+            Ok(HostEvent::Log(line)) => lines.push(line),
+            Ok(HostEvent::Ready(_)) => {}
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    lines
+}
+
 /// List installed plugins (for the Settings > Plugins management page).
 #[tauri::command]
-fn get_installed_plugins() -> Vec<store::InstalledPluginInfo> {
-    store::list_installed()
+fn get_installed_plugins(bridge: tauri::State<Arc<Bridge>>) -> Vec<store::InstalledPluginInfo> {
+    let disabled = bridge.plugins.disabled_snapshot();
+    let migrated: std::collections::HashSet<String> =
+        bridge.plugins.managed_externals().into_iter().collect();
+    store::list_installed(&disabled, &migrated)
 }
 
 /// Uninstall a plugin from the desktop plugins directory.
@@ -358,10 +433,30 @@ fn attach_content_webview(app: &tauri::AppHandle, url: Url, bridge: &Bridge) -> 
         bridge.theme_observer_script(),
         bridge.plugin_proxy_script()
     );
+    // 克隆一份 app 句柄给 on_new_window 闭包使用：window.open(url) 触发时，
+    // 需要靠它拿到 content webview 并 navigate(url)，把外部新窗口请求重定向
+    // 回当前 WebView，而不是让 WebView2 委托给系统浏览器。
+    let app_for_new_window = app.clone();
     let builder = WebviewBuilder::new("content", WebviewUrl::External(url))
         // 白色背景：DSH 页面布局瞬间未铺满时，露出的底色与浅色页面一致
         .background_color(Color(255, 255, 255, 255))
-        .initialization_script(&init_script);
+        .initialization_script(&init_script)
+        // 导航白名单：只放行 loopback（127.0.0.1 / localhost）与 about:blank，
+        // 其余一律取消。防止 DSH 页面被劫持或跳到外部域脱离 WebView。
+        .on_navigation(|nav_url| is_loopback_or_blank(nav_url))
+        // 新窗口拦截：DSH 页面里任何 window.open(url) 都不再委托给系统浏览器，
+        // 而是把 url 重定向回当前 content webview 导航过去，并拒绝弹新窗口。
+        // 这样既能拦住“启动即弹系统浏览器”，又不破坏页面内部的跳转意图。
+        .on_new_window(move |opened_url, _features| {
+            // 只处理 loopback 目标：把它导航回当前 content webview。
+            // 外部域直接 Deny，不在 WebView 内跳转，避免被钓鱼/劫持。
+            if is_loopback_or_blank(&opened_url) {
+                if let Some(content) = app_for_new_window.get_webview("content") {
+                    let _ = content.navigate(opened_url);
+                }
+            }
+            NewWindowResponse::Deny
+        });
 
     let child = window.add_child(
         builder,
@@ -398,6 +493,20 @@ fn attach_content_webview(app: &tauri::AppHandle, url: Url, bridge: &Bridge) -> 
         }
     });
     Ok(())
+}
+
+/// 判断一个 URL 是否应该被 content webview 放行：
+/// `127.0.0.1` / `localhost`（DSH 自己的 web UI 与其内部跳转）
+/// 与 `about:blank`（WebView2 临时文档）一律放行；其余全部拒绝。
+/// 防止页面被劫持或跳到外部域脱离 WebView、以及 window.open 弹系统浏览器。
+fn is_loopback_or_blank(url: &Url) -> bool {
+    if url.scheme() == "about" {
+        return true;
+    }
+    match url.host_str() {
+        Some("127.0.0.1") | Some("localhost") | Some("::1") => true,
+        _ => false,
+    }
 }
 
 /// 用圆角窗口区域裁剪窗口（含子 WebView），实现四角圆角。
@@ -740,6 +849,7 @@ fn finish_launch(handle: &tauri::AppHandle, state: &SharedState, url: &str, brid
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_launch_state,
             get_desktop_plugins,
@@ -747,7 +857,14 @@ pub fn run() {
             set_close_to_tray,
             set_auto_start,
             set_workspace_folder,
+            set_update_settings,
+            get_app_version,
+            check_updates,
+            install_harness_update,
+            install_client_update,
+            restart_app,
             export_diagnostics,
+            drain_host_log,
             get_installed_plugins,
             uninstall_plugin,
             list_directory,
@@ -776,18 +893,33 @@ pub fn run() {
             let plugins = Arc::new(PluginManager::new(plugins_root.clone(), String::new()));
             eprintln!("dsh-desktop: plugins_root={}", plugins_root.display());
 
-            // 后端 overlay 指向当前 DSH_HOME（与 discover 的默认一致）。
-            let dsh_home = std::env::var("DSH_HOME")
+            // 后端 overlay 必须指向 host 实际使用的 DSH_HOME。discover() 读
+            // dsh-launch.json 的 dshHome 字段(优先级最高,host.rs 也用它设 DSH_HOME
+            // 并作为 --patch 的基目录),所以这里直接复用 discover 的解析结果,
+            // 而不是另起一套 env→APPDATA 回退——否则 write_native_disable 会写进
+            // 回退目录而 host 的 watchUserPatches 看的是另一份,两边永远对不上。
+            let snapshot = discover();
+            let dsh_home = snapshot
+                .dsh_home
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    std::env::var("APPDATA")
-                        .map(|appdata| {
-                            PathBuf::from(appdata)
-                                .join("DeepSeek Harness")
-                                .join("dsh-home")
+                .unwrap_or_else(|| {
+                    std::env::var("DSH_HOME")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|_| {
+                            std::env::var("APPDATA")
+                                .map(|appdata| {
+                                    PathBuf::from(appdata)
+                                        .join("DeepSeek Harness")
+                                        .join("dsh-home")
+                                })
+                                .unwrap_or_else(|_| PathBuf::from("dsh-home"))
                         })
-                        .unwrap_or_else(|_| PathBuf::from("dsh-home"))
                 });
+            eprintln!(
+                "dsh-desktop: backend home={} (discover source={})",
+                dsh_home.display(),
+                snapshot.source
+            );
             plugins.set_backend_home(dsh_home, "web".into());
 
             // 本地主题桥 + 插件桥：注入脚本把 DSH 页面的主题快照上报到这里，

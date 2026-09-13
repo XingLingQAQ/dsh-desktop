@@ -1,0 +1,648 @@
+/* MCP tab: the live connection status and tool list.
+ *
+ * Colors come from the `--dsw-alias-*` tokens DSH publishes, so the panel
+ * follows the app's theme (including dark mode) without local branching — same
+ * convention as skills.css next door, and the two tabs share their geometry:
+ * one header row with the actions at the far end, one card list in between.
+ *
+ * The row actions and the select are the shared controls in controls.css; only
+ * their widths are set here.
+ */
+
+.dsx-mcp {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 760px;
+}
+
+/* ── header ─────────────────────────────────────────────────────────────── */
+
+.dsx-mcp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.dsx-mcp-title {
+  font-size: var(--dsw-font-s-strong-14-font-size);
+  font-weight: var(--dsw-font-s-strong-14-font-weight);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-mcp-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.dsx-mcp-sep {
+  color: var(--dsw-alias-border-l3);
+}
+
+.dsx-mcp-summaryWarn {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.dsx-mcp-filler {
+  flex: 1;
+}
+
+/* Widths live on the Menu wrapper (the trigger fills it): the kind column of a
+   field row, and the transport picker's own. Doubled because the platform's
+   stylesheet position in the document is unknown to this bundle. */
+.dsx-mcp-chooserKind.dsx-mcp-chooserKind {
+  width: 104px;
+}
+
+.dsx-mcp-chooserWide.dsx-mcp-chooserWide {
+  flex: none;
+  width: 176px;
+}
+
+.dsx-mcp-hint {
+  margin: 0;
+  font-size: var(--dsw-font-xs-13-font-size);
+  line-height: 1.6;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ── empty / error states ───────────────────────────────────────────────── */
+
+.dsx-mcp-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 44px 24px;
+  text-align: center;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+}
+
+/* Same tile as the skills tab's empty state draws, so the two pages look like
+   one product when both are empty. */
+.dsx-mcp-emptyMark {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 4px;
+  border-radius: 12px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-xxs-12-font-size);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
+.dsx-mcp-emptyTitle {
+  margin: 0;
+  font-size: var(--dsw-font-s-14-font-size);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-mcp-emptyHint {
+  margin: 0;
+  font-size: var(--dsw-font-xs-13-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-mcp-status {
+  margin: 0;
+  padding: 20px;
+  text-align: center;
+  font-size: var(--dsw-font-xs-13-font-size);
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+}
+
+.dsx-mcp-error {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: var(--dsw-font-xs-13-font-size);
+  color: var(--dsw-alias-state-error-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-state-error-primary);
+  border-radius: 10px;
+}
+
+/* ── cards ──────────────────────────────────────────────────────────────── */
+
+.dsx-mcp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dsx-mcp-card {
+  padding: 12px 14px;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  transition: border-color 0.15s ease;
+}
+
+.dsx-mcp-card:hover {
+  border-color: var(--dsw-alias-border-l3);
+}
+
+/*
+ * A stripe down the left edge, but only on the states that want attention: a
+ * list of green bars would be noise, and the healthy rows already carry their
+ * dot and badge. These rules come after `:hover` so a stripe's colour is not
+ * traded away while the pointer is over the card.
+ */
+.dsx-mcp-card[data-health="connecting"] {
+  box-shadow: inset 2px 0 0 var(--dsw-alias-state-warn-primary);
+}
+
+.dsx-mcp-card[data-health="empty"] {
+  border-color: var(--dsw-alias-state-warn-primary);
+  box-shadow: inset 2px 0 0 var(--dsw-alias-state-warn-primary);
+}
+
+.dsx-mcp-card[data-health="failed"] {
+  border-color: var(--dsw-alias-state-error-primary);
+  box-shadow: inset 2px 0 0 var(--dsw-alias-state-error-primary);
+}
+
+/* A paused server is out of the registry but still configured; the card stays
+   put and reads as inert, the same way a paused skill does. */
+.dsx-mcp-card[data-health="paused"] {
+  opacity: 0.72;
+}
+
+.dsx-mcp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* The dot is the status's fastest read; the badge next to it spells it out. */
+.dsx-mcp-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-mcp-dot[data-health="connected"] { background: var(--dsw-alias-state-success-primary); }
+.dsx-mcp-dot[data-health="connecting"] { background: var(--dsw-alias-state-warn-primary); }
+.dsx-mcp-dot[data-health="empty"] { background: var(--dsw-alias-state-warn-primary); }
+.dsx-mcp-dot[data-health="failed"] { background: var(--dsw-alias-state-error-primary); }
+.dsx-mcp-dot[data-health="paused"] { background: var(--dsw-alias-label-dimmed); }
+.dsx-mcp-dot[data-health="detached"] { background: var(--dsw-alias-label-dimmed); }
+
+/* The name doubles as the tool list's disclosure: the caret sits where the eye
+   already is, which is what keeps the action cluster down to four icons. */
+.dsx-mcp-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-s-strong-14-font-size);
+  font-weight: var(--dsw-font-s-strong-14-font-weight);
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.dsx-mcp-name:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.dsx-mcp-name:disabled {
+  cursor: default;
+}
+
+.dsx-mcp-caret {
+  display: inline-grid;
+  place-items: center;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-mcp-name:hover:not(:disabled) .dsx-mcp-caret {
+  color: var(--dsw-alias-label-primary);
+}
+
+/*
+ * A server with no tools has nothing to unfold, so its caret is kept in the
+ * layout but not drawn — otherwise the names would start at two different x
+ * positions down the list.
+ */
+.dsx-mcp-name:disabled .dsx-mcp-caret {
+  visibility: hidden;
+}
+
+.dsx-mcp-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dsx-mcp-badge {
+  padding: 1px 8px;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  line-height: 16px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsx-mcp-badge[data-health="connected"] {
+  background: var(--dsw-alias-state-success-secondary);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-mcp-badge[data-health="connecting"] {
+  background: var(--dsw-alias-state-warn-secondary);
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.dsx-mcp-badge[data-health="empty"] {
+  background: var(--dsw-alias-state-warn-secondary);
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.dsx-mcp-badge[data-health="failed"] {
+  background: var(--dsw-alias-state-error-secondary);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* ── endpoint line ──────────────────────────────────────────────────────── */
+
+.dsx-mcp-endpoint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 8px 0 0;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+}
+
+/* How it connects, tagged so a stdio command and an http address are told
+   apart at a glance without reading the string. */
+.dsx-mcp-transport {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--dsw-font-markdown-code-font-family);
+}
+
+.dsx-mcp-endpointBody {
+  min-width: 0;
+  font-family: var(--dsw-font-markdown-code-font-family);
+  color: var(--dsw-alias-label-dimmed);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsx-mcp-note {
+  margin: 6px 0 0;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-mcp-note[data-tone="warn"] {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.dsx-mcp-note[data-tone="error"] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsx-mcp-note[data-tone="probe"] {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* A note with an action on the end of it. The action takes the note's color. */
+.dsx-mcp-noteRow {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 6px;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-mcp-noteRow[data-tone="warn"] {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.dsx-mcp-noteRow .dsx-iconButton {
+  color: inherit;
+}
+
+/* ── tool list ──────────────────────────────────────────────────────────── */
+
+.dsx-mcp-toolsWrap {
+  margin-top: 8px;
+}
+
+/* Only rendered for a list long enough to be worth searching; below that the
+   box would be bigger than what it filters. */
+.dsx-mcp-toolsFilter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  padding: 0 8px;
+  height: 28px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The box lights up, not the bare input inside it — the input has no border of
+   its own to colour. */
+.dsx-mcp-toolsFilter:focus-within {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.dsx-mcp-toolsSearch {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+}
+
+.dsx-mcp-toolsSearch::placeholder {
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.dsx-mcp-toolsNone {
+  margin: 6px 0 0;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-mcp-tools {
+  margin: 0;
+  padding: 4px 8px;
+  list-style: none;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  max-height: 260px;
+  overflow-y: auto;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l1);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l1);
+}
+
+.dsx-mcp-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 2px;
+}
+
+.dsx-mcp-tool + .dsx-mcp-tool {
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+
+.dsx-mcp-toolName {
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+}
+
+.dsx-mcp-toolDesc {
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ── editor dialog ──────────────────────────────────────────────────────── */
+
+/*
+ * Modal's own dialog has no height ceiling, so a form with a few header rows
+ * runs off the top of the viewport. Doubled class: the platform's stylesheet is
+ * a hashed module whose position in the document this bundle cannot know, so a
+ * same-specificity rule of ours may lose.
+ */
+.dsx-mcp-dialog.dsx-mcp-dialog {
+  width: min(680px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+}
+
+/*
+ * The editor form. One grid, so every label and every control starts on the
+ * same line whether it is a plain field or the field list; rows that belong to
+ * a section rather than to one label span both columns.
+ */
+.dsx-mcp-form {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px 12px;
+  max-height: min(62vh, 560px);
+  overflow-y: auto;
+  padding-right: 4px;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l1);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l1);
+}
+
+.dsx-mcp-formLabel {
+  padding-top: 5px;
+  font-size: var(--dsw-font-xs-13-font-size);
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsx-mcp-formBody {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.dsx-mcp-formInline {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Section-wide rows: the field list, its head, a note, an error. */
+.dsx-mcp-formWide,
+.dsx-mcp-fieldsHead,
+.dsx-mcp-fieldList,
+.dsx-mcp-formEmpty {
+  grid-column: 1 / -1;
+}
+
+.dsx-mcp-rule {
+  grid-column: 1 / -1;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.dsx-mcp-formHint {
+  margin: 0;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* One line height for the whole form: the text fields, the pickers, the stored
+   chip and the icon buttons at the end of each row all measure 28px, so the
+   rows stay level.
+ *
+ * `flex: 1 1 auto` rather than `flex: 1`: the same field is a row item inside
+ * the field list (where it should take the leftover width) and the only child
+ * of a label's column (where a zero basis would resolve its HEIGHT to the text
+ * instead of to 28px). `border-box` is spelled out because the app has no
+ * global reset — without it the border is added on top of the height. */
+.dsx-mcp-input,
+.dsx-mcp-textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 8px;
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-xxs-12-font-size);
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+}
+
+.dsx-mcp-input::placeholder,
+.dsx-mcp-textarea::placeholder {
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.dsx-mcp-input:focus,
+.dsx-mcp-textarea:focus {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.dsx-mcp-input:disabled,
+.dsx-mcp-textarea:disabled {
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+/* The one field that grows: a command's arguments are a list, not a line. */
+.dsx-mcp-textarea {
+  height: auto;
+  padding: 6px 8px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.dsx-mcp-inputNarrow {
+  flex: none;
+  width: 160px;
+}
+
+.dsx-mcp-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--dsw-font-xs-13-font-size);
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+
+.dsx-mcp-fieldsHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: -2px;
+}
+
+.dsx-mcp-formEmpty {
+  margin: 0;
+  padding: 10px;
+  font-size: var(--dsw-font-xxxs-11-font-size);
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 8px;
+}
+
+.dsx-mcp-fieldList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Name | kind | value | delete. Fixed middle and end columns, so every row's
+   value field starts at the same x whatever the row's kind is. */
+.dsx-mcp-fieldRow {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.85fr) 104px minmax(0, 1.35fr) 28px;
+  align-items: center;
+  gap: 6px;
+}
+
+.dsx-mcp-fieldValue {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* Stands in for a secret field the Host holds a value for: same box as the
+   input it replaces, so the row does not change height when it appears. */
+.dsx-mcp-stored {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 8px;
+  font-family: var(--dsw-font-markdown-code-font-family);
+  font-size: var(--dsw-font-xxs-12-font-size);
+  color: var(--dsw-alias-label-dimmed);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+}
+
+/* Doubled: the platform's button styles win ties by document order, which this
+   bundle cannot reason about. */
+.dsx-mcp-dangerFill.dsx-mcp-dangerFill {
+  background: var(--dsw-alias-state-error-primary);
+  border-color: var(--dsw-alias-state-error-primary);
+  color: #fff;
+}

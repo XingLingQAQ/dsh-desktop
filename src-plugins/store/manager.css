@@ -1,0 +1,549 @@
+.dsx-mgr {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.dsx-mgr-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dsx-mgr-search {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+
+.dsx-mgr-meta {
+  font-size: 11.5px;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dsx-mgr-list {
+  display: grid;
+  gap: 8px;
+  /* The settings pane scrolls; the list must not add a second scrollbar. */
+  min-height: 0;
+}
+
+.dsx-mgr-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-primary, transparent);
+  /* Same whole-card hover as the store list (.dsx-store-card): tint + soft
+     lv2-magnitude shadow on the card itself, so both lists read identically
+     under the pointer. */
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
+  /* A row may expand into a config form; stack body + form vertically. */
+  flex-wrap: wrap;
+}
+
+.dsx-mgr-row:hover {
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.06));
+  border-color: var(--dsw-alias-border-primary, rgba(127, 127, 127, 0.35));
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.02),
+    0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.dsx-mgr-row[data-disabled='true'] {
+  opacity: 0.6;
+}
+
+/* Outdated rows carry the same amber attention accent as the store cards. */
+.dsx-mgr-row[data-outdated='true'] {
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.dsx-mgr-row[data-outdated='true']:hover {
+  border-color: rgba(245, 158, 11, 0.55);
+}
+
+.dsx-mgr-row-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.dsx-mgr-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dsx-mgr-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-text-primary, #111827);
+  overflow-wrap: anywhere;
+}
+
+.dsx-mgr-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-text-secondary, #6b7280);
+  overflow-wrap: anywhere;
+}
+
+.dsx-mgr-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dsx-mgr-empty,
+.dsx-mgr-error {
+  padding: 28px 12px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+}
+
+.dsx-mgr-error {
+  color: var(--dsw-alias-text-danger, #dc2626);
+}
+
+/* Inline config form, expanded under a row. The height animation wraps it in
+   a motion.div (overflow hidden, flexBasis 100%); the form itself keeps the
+   visual padding so the collapse doesn't clip content against rounded edges. */
+.dsx-mgr-config {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-top: 1px dashed var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.25));
+}
+
+.dsx-mgr-config-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-text-primary, #111827);
+}
+
+.dsx-mgr-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dsx-mgr-field-label {
+  font-size: 12px;
+  color: var(--dsw-alias-text-secondary, #6b7280);
+}
+
+.dsx-mgr-field-hint {
+  font-size: 11px;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+}
+
+.dsx-mgr-field-control {
+  /* Native selects/checkboxes share a class so CSS tokens apply once. The
+     ui-primitives Input atom owns its own border/padding via CSS modules, so
+     it gets a layout-only wrapper class instead (dsx-mgr-field-input). */
+  font: inherit;
+  font-size: 13px;
+  color: var(--dsw-alias-text-primary, #111827);
+  background: var(--dsw-alias-bg-primary, transparent);
+  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.25));
+  border-radius: 8px;
+  padding: 6px 8px;
+  outline: none;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.dsx-mgr-field-control:focus {
+  border-color: var(--dsw-alias-text-secondary, #6b7280);
+}
+
+/* Layout-only class for the ui-primitives Input wrapper span: the atom is
+   inline-flex by default, so force full width so the field fills the column. */
+.dsx-mgr-field-input {
+  width: 100%;
+}
+
+.dsx-mgr-select {
+  appearance: none;
+  cursor: pointer;
+}
+
+.dsx-mgr-bool {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.dsx-mgr-bool input {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--dsw-alias-text-secondary, #6b7280);
+}
+
+.dsx-mgr-config-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+/* --- Native plugin collapsible group ------------------------------------ */
+/* The 原生插件 group lists DSH Loader entries (read-only). Default collapsed;
+   expanding lazily calls ctx.remote.pluginInventory.list(). The chrome mirrors
+   ui-settings-plugin-inventory's card pattern but in the manager's flat style. */
+
+.dsx-mgr-native {
+  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-primary, transparent);
+  overflow: hidden;
+}
+
+.dsx-mgr-native-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-text-primary, #111827);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dsx-mgr-native-head:hover {
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.06));
+}
+
+.dsx-mgr-native-chevron {
+  display: inline-block;
+  width: 12px;
+  text-align: center;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+  flex: none;
+}
+
+.dsx-mgr-native-title {
+  flex: 1 1 auto;
+}
+
+.dsx-mgr-native-count {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+}
+
+.dsx-mgr-native-body {
+  padding: 4px 12px 12px;
+  border-top: 1px dashed var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.25));
+}
+
+.dsx-mgr-native-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dsx-mgr-native-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-radius: 6px;
+  /* A configurable row may expand a config card below; let it wrap full-width. */
+  flex-wrap: wrap;
+}
+
+.dsx-mgr-native-row[data-enabled='false'] {
+  opacity: 0.6;
+}
+
+/* Per-row config affordance: ghost button sized to match the row's compact density. */
+.dsx-mgr-native-config-btn {
+  flex: none;
+}
+
+/* Inline expand container for a native row's config card. Sits below the row's
+   head line (dot + name + state + 配置), full-width, indented with a left rule
+   and a tinted ground so it reads as subordinate to its owning row. */
+.dsx-mgr-native-config {
+  flex-basis: 100%;
+  margin-top: 6px;
+  padding: 4px 0 4px 12px;
+  border-left: 2px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.25));
+  border-radius: 0 6px 6px 0;
+  min-width: 0;
+}
+
+/* When a NativeCard is rendered inline (inside .dsx-mgr-native-config) rather
+   than in the bottom <ul>, constrain its width so the form doesn't stretch
+   across the whole settings pane. */
+.dsx-mgr-card-inline {
+  max-width: 560px;
+}
+
+.dsx-mgr-native-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--dsw-alias-label-tertiary, #9ca3af);
+}
+
+.dsx-mgr-native-dot[data-phase='active'] {
+  background: var(--dsw-alias-state-success-primary, #10b981);
+}
+
+.dsx-mgr-native-dot[data-phase='failed'] {
+  background: var(--dsw-alias-state-error-primary, #ef4444);
+}
+
+.dsx-mgr-native-dot[data-phase='loading'] {
+  background: var(--dsw-alias-state-business-primary, #f59e0b);
+}
+
+/* pending/unloading/unobserved/disabled fall through to the default tertiary
+   token — they're not "wrong", just not yet running or not interesting. */
+
+.dsx-mgr-native-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.dsx-mgr-native-short {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--dsw-alias-text-primary, #111827);
+  overflow-wrap: anywhere;
+}
+
+.dsx-mgr-native-id {
+  font-size: 10.5px;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+  font-family: var(--dsw-alias-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  overflow-wrap: anywhere;
+}
+
+/* Trailing cluster on a native row: config / play-pause toggle / status dot,
+   pinned to the right end so the enabled indicator reads as a row tail. */
+.dsx-mgr-native-trailing {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+/* Status dot replacing the old 已启用/已停用 text pill. Green when the entry
+   is enabled, tertiary gray when disabled — same semantics, less ink. */
+.dsx-mgr-native-status {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex: none;
+  margin-left: 4px;
+  border-radius: 999px;
+  background: var(--dsw-alias-label-tertiary, #9ca3af);
+}
+
+.dsx-mgr-native-status[data-enabled='true'] {
+  background: var(--dsw-alias-state-success-primary, #10b981);
+}
+
+/* Square ghost icon button shared by native rows and desktop ManagerRows.
+   A 28px hit target, transparent until hover, currentColor glyph — matches
+   the compact density of the list. The --danger modifier reddens the hover
+   for destructive actions (uninstall). */
+.dsx-mgr-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  flex: none;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-text-secondary, #6b7280);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.dsx-mgr-icon-btn:hover:not(:disabled) {
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.1));
+  color: var(--dsw-alias-text-primary, #111827);
+}
+
+.dsx-mgr-icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.dsx-mgr-icon-btn--danger:hover:not(:disabled) {
+  color: var(--dsw-alias-text-danger, #dc2626);
+  background: rgba(220, 38, 38, 0.08);
+}
+
+/* --- Native config cards (bash / agent-loop / web-search) --------------- */
+/* The three cards reproduce ui-settings-plugins's PluginCard chrome in the
+   manager's flat style. Each is a <li> in a <ul>; fields stack; a footer
+   carries discard/save. The card is hidden (renders null) when its namespace
+   is unavailable — the deployment does not compose the owning plugin. */
+
+.dsx-mgr-cards-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-text-secondary, #6b7280);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+}
+
+.dsx-mgr-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dsx-mgr-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-primary, transparent);
+}
+
+.dsx-mgr-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-text-primary, #111827);
+}
+
+.dsx-mgr-card-desc {
+  font-size: 11.5px;
+  color: var(--dsw-alias-text-secondary, #6b7280);
+  line-height: 1.5;
+  margin-top: -4px;
+}
+
+.dsx-mgr-card-readonly {
+  font-size: 11px;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.08));
+}
+
+.dsx-mgr-card-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dsx-mgr-card-badge {
+  display: inline-block;
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.08));
+}
+
+.dsx-mgr-card-badge[data-configured='true'] {
+  color: var(--dsw-alias-state-success-primary, #10b981);
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.dsx-mgr-card-reset,
+.dsx-mgr-card-clear {
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-text-tertiary, #9ca3af);
+  font: inherit;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.dsx-mgr-card-reset:hover,
+.dsx-mgr-card-clear:hover {
+  color: var(--dsw-alias-text-primary, #111827);
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.1));
+}
+
+.dsx-mgr-card-reset:disabled,
+.dsx-mgr-card-clear:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.dsx-mgr-card-failed {
+  font-size: 11px;
+  color: var(--dsw-alias-text-danger, #dc2626);
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(220, 38, 38, 0.06);
+}
+
+.dsx-mgr-card-footer {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+/* Field header row: label + badges + reset/clear buttons, inline. */
+.dsx-mgr-field-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dsx-mgr-field-head .dsx-mgr-field-label {
+  flex: 1 1 auto;
+}
+
+.dsx-mgr-field-invalid {
+  color: var(--dsw-alias-text-danger, #dc2626);
+}

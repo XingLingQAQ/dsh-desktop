@@ -5,6 +5,7 @@
 //! installed inventory, uninstall, and the directory listing the workspace
 //! picker walks.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,18 @@ pub struct InstalledPluginInfo {
     pub description: String,
     pub has_client: bool,
     pub has_server: bool,
+    /// Whether the plugin is currently paused (excluded from the boot graph).
+    pub disabled: bool,
+    /// True when this plugin was migrated out of the DSH profile (`dsh plugin
+    /// add` → desktop takeover). Drives the provenance pill in the manager UI.
+    #[serde(rename = "fromProfile")]
+    pub from_profile: bool,
+    /// Config schema from `package.json`'s `dsh.config` array, passed through
+    /// verbatim. Each element is `{field,label,type,hint?,default?,options?}`.
+    /// Empty when the plugin declares no config. Serialized as `configSchema` to
+    /// match the management UI's expected wire shape.
+    #[serde(rename = "configSchema")]
+    pub config_schema: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -58,7 +71,7 @@ pub fn plugins_root() -> PathBuf {
         .unwrap_or_else(|_| data_root().join("plugins"))
 }
 
-fn read_pkg_meta(dir: &Path, id: &str) -> (String, String, String) {
+fn read_pkg_meta(dir: &Path, id: &str) -> (String, String, String, Vec<serde_json::Value>) {
     let pkg_path = dir.join("package.json");
     if let Ok(text) = fs::read_to_string(&pkg_path) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -77,14 +90,22 @@ fn read_pkg_meta(dir: &Path, id: &str) -> (String, String, String) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            return (name, version, description);
+            // `dsh.config` is an array of field descriptors; pass it through
+            // verbatim so the management UI can render the form.
+            let config_schema = value
+                .get("dsh")
+                .and_then(|dsh| dsh.get("config"))
+                .and_then(|c| c.as_array())
+                .cloned()
+                .unwrap_or_default();
+            return (name, version, description, config_schema);
         }
     }
-    (id.to_string(), "0.0.0".to_string(), String::new())
+    (id.to_string(), "0.0.0".to_string(), String::new(), Vec::new())
 }
 
 /// List installed plugins in the desktop plugins directory.
-pub fn list_installed() -> Vec<InstalledPluginInfo> {
+pub fn list_installed(disabled: &HashSet<String>, migrated: &HashSet<String>) -> Vec<InstalledPluginInfo> {
     let root = plugins_root();
     let mut out = Vec::new();
     if let Ok(read_dir) = fs::read_dir(&root) {
@@ -94,6 +115,9 @@ pub fn list_installed() -> Vec<InstalledPluginInfo> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "node_modules" || name.starts_with('.') {
+                continue;
+            }
             if name.starts_with('@') {
                 if let Ok(scoped) = fs::read_dir(&path) {
                     for sub in scoped.flatten() {
@@ -101,12 +125,12 @@ pub fn list_installed() -> Vec<InstalledPluginInfo> {
                         if sub_path.is_dir() {
                             let sub_name = sub.file_name().to_string_lossy().into_owned();
                             let id = format!("{name}/{sub_name}");
-                            out.push(read_installed(&sub_path, &id));
+                            out.push(read_installed(&sub_path, &id, disabled, migrated));
                         }
                     }
                 }
             } else {
-                out.push(read_installed(&path, &name));
+                out.push(read_installed(&path, &name, disabled, migrated));
             }
         }
     }
@@ -114,18 +138,69 @@ pub fn list_installed() -> Vec<InstalledPluginInfo> {
     out
 }
 
-fn read_installed(dir: &Path, id: &str) -> InstalledPluginInfo {
-    let (name, version, description) = read_pkg_meta(dir, id);
+fn read_installed(
+    dir: &Path,
+    id: &str,
+    disabled: &HashSet<String>,
+    migrated: &HashSet<String>,
+) -> InstalledPluginInfo {
+    let (name, version, description, config_schema) = read_pkg_meta(dir, id);
     InstalledPluginInfo {
         id: id.to_string(),
         name,
         version,
         description,
-        has_client: dir.join("client.js").is_file(),
-        has_server: ["server.js", "index.mjs", "index.js"]
-            .iter()
-            .any(|f| dir.join(f).is_file()),
+        has_client: client_js_path(dir).is_some(),
+        // Bundle-patched host halves live at `main` / `exports["."]` (often
+        // `lib/index.js`), not a conventional root file. Match the overlay
+        // scan so the 后端 pill is honest.
+        has_server: crate::registry::dir_has_bundle_patch(dir)
+            || crate::registry::dir_has_backend_entry(dir),
+        disabled: disabled.contains(id),
+        from_profile: migrated.contains(id),
+        config_schema,
     }
+}
+
+/// Resolve a plugin's client bundle path: the conventional `client.js`, or
+/// the path named by `exports["./client"]` in `package.json` — which may be a
+/// string or `{"default": "./lib/client.js"}`. Mirrors `PluginManager::client_path`.
+fn client_js_path(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let conventional = dir.join("client.js");
+    if conventional.is_file() {
+        return Some(conventional);
+    }
+    let pkg_path = dir.join("package.json");
+    if pkg_path.is_file() {
+        if let Ok(text) = std::fs::read_to_string(&pkg_path) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(client) = value.get("exports").and_then(|e| e.get("./client")) {
+                    if let Some(rel) = client
+                        .as_str()
+                        .or_else(|| client.get("default").and_then(|d| d.as_str()))
+                    {
+                        let candidate = dir.join(rel);
+                        if candidate.is_file() {
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Read the `dsh.config` schema array for a plugin id, or an empty vec when
+/// the plugin has no config or no `package.json`. Used by the bridge's
+/// `GET /plugins/config` route to return the schema alongside stored values.
+pub fn config_schema_for(id: &str) -> Vec<serde_json::Value> {
+    let dir = plugins_root().join(id);
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let (_name, _version, _description, schema) = read_pkg_meta(&dir, id);
+    schema
 }
 
 /// Uninstall a plugin from the desktop plugins directory.

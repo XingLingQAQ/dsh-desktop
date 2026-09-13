@@ -178,6 +178,23 @@ fn from_harness_versions() -> Option<EnvironmentSnapshot> {
     })
 }
 
+/// The harness copy this desktop installed itself, if there is one.
+///
+/// An update from this app lands in `runtime\dsh` rather than in the official
+/// launcher's `harness-versions` tree, which is not ours to overwrite. Once it
+/// exists it wins over every detection layer: choosing a version here is an
+/// explicit act, and the version chosen is the one that should run.
+fn own_harness_cli() -> Option<String> {
+    let cli = runtime_root()
+        .join("dsh")
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("lib")
+        .join("bin.js");
+    cli.is_file().then(|| cli.to_string_lossy().into_owned())
+}
+
 /// Fall back to `node` on PATH (probed) + DSH_HOME env.
 fn from_path_and_env() -> EnvironmentSnapshot {
     let dsh_home = std::env::var("DSH_HOME").ok();
@@ -250,6 +267,13 @@ pub fn discover() -> EnvironmentSnapshot {
     let mut snapshot = from_launch_json()
         .or_else(from_harness_versions)
         .unwrap_or_else(from_path_and_env);
+
+    // This desktop's own copy, when an update installed one, takes precedence
+    // over whatever the layers above found.
+    if let Some(cli) = own_harness_cli() {
+        snapshot.cli = Some(cli);
+        snapshot.source = format!("{} + runtime/dsh", snapshot.source);
+    }
 
     // Validate node; fall back to PATH.
     if let Some(node) = &snapshot.node {

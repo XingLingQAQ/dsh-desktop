@@ -771,6 +771,9 @@ body {
 /* ============ 设置页标签 / 插件管理 / 托盘菜单微调 ============ */
 .settings-panel.wide {
   width: 420px;
+  /* 更新页内容比一屏高；面板贴着标题栏，超出窗口的部分要能滚动。 */
+  max-height: calc(100vh - var(--titlebar-height) - 20px);
+  overflow-y: auto;
 }
 
 .settings-tabs {
@@ -812,4 +815,185 @@ body {
   padding: 6px 10px;
   font-size: 11.5px;
   border-radius: 6px;
+}
+
+/* ============ 更新面板 ============ */
+/* 两半各管各的：内核是 npm 包，客户端走 Tauri 的签名清单。 */
+.upd {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.upd-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--ds-border-2);
+  border-radius: 10px;
+  background: var(--ds-bg-2);
+}
+
+.upd-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.upd-head strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ds-label);
+}
+
+.upd-version {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  color: var(--ds-label-2);
+}
+
+.upd-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ds-label-2);
+}
+
+.upd-notes,
+.upd-log {
+  margin: 0;
+  max-height: 120px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--ds-overlay);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.upd-notes {
+  color: var(--ds-label);
+  word-break: break-word;
+}
+
+.upd-log {
+  color: var(--ds-label-2);
+  word-break: break-all;
+}
+
+.upd-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.upd-button {
+  padding: 6px 12px;
+  border: 1px solid var(--ds-border-2);
+  border-radius: 8px;
+  background: var(--ds-bg-1);
+  color: var(--ds-label);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.upd-button:hover:not(:disabled) {
+  background: var(--ds-hover);
+}
+
+.upd-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.upd-button.primary {
+  background: var(--ds-brand);
+  border-color: var(--ds-brand);
+  color: var(--ds-brand-invert);
+}
+
+.upd-button.primary:hover:not(:disabled) {
+  background: var(--ds-brand);
+  opacity: 0.88;
+}
+
+.upd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ds-label-2);
+}
+
+.upd-field input,
+.upd-field select {
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--ds-border-2);
+  border-radius: 7px;
+  background: var(--ds-bg-1);
+  color: var(--ds-label);
+  font-family: inherit;
+  font-size: 11.5px;
+}
+
+.upd-field input {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+}
+
+.upd-field input:focus,
+.upd-field select:focus {
+  outline: none;
+  border-color: var(--ds-brand);
+}
+
+.upd-field input::placeholder {
+  color: var(--ds-label-2);
+  opacity: 0.7;
+}
+
+.upd-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.upd-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--ds-hover);
+  overflow: hidden;
+}
+
+.upd-barFill {
+  height: 100%;
+  background: var(--ds-brand);
+  transition: width 0.15s ease;
+}
+
+.upd-progressText {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--ds-label-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.upd-notice {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ds-error);
+  word-break: break-word;
 }

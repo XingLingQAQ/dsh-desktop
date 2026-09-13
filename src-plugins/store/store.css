@@ -46,6 +46,14 @@
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
+.dsx-store-categories {
+  /* The category row carries ~12 chips vs the 3 state chips above it; force it
+     onto its own line so the search/filters/refresh row stays compact, and let
+     the chips wrap onto further lines on narrow panes. */
+  flex-basis: 100%;
+  flex-wrap: wrap;
+}
+
 .dsx-store-meta {
   font-size: 11.5px;
   color: var(--dsw-alias-text-tertiary, #9ca3af);
@@ -70,14 +78,39 @@
   border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
   border-radius: 10px;
   background: var(--dsw-alias-bg-primary, transparent);
+  /* Hover feedback belongs to the whole card, not the inner body: a tinted
+     rectangle inside the card read as a misaligned patch (square corners,
+     inset from the card edge). Shadow magnitude follows DSH's own plugin
+     card (--dsw-shadow-lv2 ≈ two soft black layers), which the settings
+     pane's native list uses. */
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
 }
 
+.dsx-store-card:hover {
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.06));
+  border-color: var(--dsw-alias-border-primary, rgba(127, 127, 127, 0.35));
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.02),
+    0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+/* The clickable area is still the body (title/desc/facts); only the cursor
+   lives here now that the visual hover state moved to .dsx-store-card. */
 .dsx-store-card-body {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 5px;
+  cursor: pointer;
+}
+
+.dsx-store-card-body:focus-visible {
+  outline: 2px solid var(--dsw-alias-text-secondary, #6b7280);
+  outline-offset: 2px;
 }
 
 .dsx-store-title {
@@ -133,6 +166,381 @@
   color: var(--dsw-alias-text-tertiary, #9ca3af);
 }
 
+/* Animated error rows collapse via height animation; keep their text padding
+   on an inner box so the height keyframes don't fight the padding. */
+.dsx-store-error {
+  overflow: hidden;
+}
+
+/* Busy spinner inside action buttons (replaces the 处理中… text swap). */
+.dsx-store-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  opacity: 0.9;
+}
+
+/* 「可更新」 badge next to a plugin name whose catalog version is newer than
+   the installed one. Amber tint reads as "attention" without the alarm of the
+   error red; the card itself also gets a subtle left accent via data-outdated. */
+.dsx-store-update-badge {
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: var(--dsw-alias-state-business-primary, #f59e0b);
+  background: rgba(245, 158, 11, 0.12);
+  white-space: nowrap;
+}
+
+.dsx-store-card[data-outdated='true'] {
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.dsx-store-card[data-outdated='true']:hover {
+  border-color: rgba(245, 158, 11, 0.55);
+}
+
 .dsx-store-error {
   color: var(--dsw-alias-text-danger, #dc2626);
+}
+
+.dsx-store-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.dsx-store-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dsx-store-back {
+  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  background: transparent;
+  color: var(--dsw-alias-text-secondary, #6b7280);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.dsx-store-back:hover {
+  color: var(--dsw-alias-text-primary, #111827);
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.06));
+}
+
+.dsx-store-detail-readme {
+  padding-top: 12px;
+  border-top: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  margin-top: 4px;
+}
+
+.dsx-store-readme-content {
+  /* READMEs are GitHub-rendered: marked + DOMPurify output. GitHub flow wraps
+     badge rows; let them wrap rather than hiding the rightmost behind a scroll. */
+  overflow-x: visible;
+}
+
+.dsx-store-readme-content > * {
+  max-width: 100%;
+}
+
+/* README images are inline by default (badges flow left-to-right like GitHub).
+   A single image alone in its paragraph is a banner or doc figure — block it
+   and center it with breathing room so it isn't crammed against surrounding text. */
+.dsx-store-readme-content img {
+  display: inline-block;
+  max-width: 100%;
+  height: auto;
+  vertical-align: middle;
+  margin: 2px 3px;
+}
+
+.dsx-store-readme-content p > img:only-child {
+  display: block;
+  margin: 12px auto;
+}
+
+.dsx-store-readme-content p > a:only-child > img:only-child {
+  display: block;
+  margin: 12px auto;
+}
+
+/* READMEs center banner/badge/figure paragraphs via <p align="center">. marked
+   keeps the align attribute and DOMPurify allows it, so honor it directly. Also
+   center any image-only paragraph that lost its align (older READMEs) and any
+   badge row — GitHub centers these regardless of how the author wrote them.
+
+   Each selector gets its own rule on purpose: a comma list is dropped wholesale
+   if any single selector is invalid, so one bad `:has` would take centering off
+   every other selector with it. Splitting isolates the blast radius.
+
+   The badge-row cases:
+   - `p:has(img ~ img)` — a row with a sibling bare <img> (mixed bare-img and
+     <a><img></a> badges).
+   - `p:has(> a ~ a):has(> a > img)` — the all-<a><img></a> row, the general
+     shields.io case where badges are plain markdown `[![alt](badge)](link)`
+     lines and marked wraps them in a <p> of all <a><img></a> (child <a>s each
+     holding one <img>). Two sibling `:has` (not nested) keeps it valid; the
+     descendant form `p:has(a img ~ a img)` DOES NOT match — `~` needs sibling
+     `<img>`s at the `<p>` level, but the imgs are nested under each <a>, and
+     `a img ~ a img` means two <img> children of the SAME <a>. The original
+     `p:has(a:has(img) ~ a:has(img))` is an INVALID selector — Chromium 151
+     rejects nested `:has` (throws on element.matches), not merely
+     unsupported-and-dropped. */
+.dsx-store-readme-content p[align='center'] {
+  text-align: center;
+}
+
+.dsx-store-readme-content p:has(> img:only-child) {
+  text-align: center;
+}
+
+.dsx-store-readme-content p:has(> a:only-child > img:only-child) {
+  text-align: center;
+}
+
+.dsx-store-readme-content p:has(img ~ img) {
+  text-align: center;
+}
+
+.dsx-store-readme-content p:has(> a ~ a):has(> a > img) {
+  text-align: center;
+}
+
+/* GitHub pulls badge images tight against their neighbors with no <a> margin;
+   our inline images already carry a 2x3 margin, so reset any link margin so
+   text links aren't affected and badges don't gap oddly. */
+.dsx-store-readme-content a {
+  margin: 0;
+}
+
+.dsx-store-readme-content :where(p, h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre, table) {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--dsw-alias-text-primary, #111827);
+}
+
+/* Headings scale down to the pane; GitHub READMEs lean on h1/h2 as section
+   dividers, so give them weight + spacing without overwhelming the card. */
+.dsx-store-readme-content h1,
+.dsx-store-readme-content h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 18px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+}
+
+.dsx-store-readme-content h3,
+.dsx-store-readme-content h4,
+.dsx-store-readme-content h5,
+.dsx-store-readme-content h6 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 14px 0 6px;
+}
+
+.dsx-store-readme-content p,
+.dsx-store-readme-content ul,
+.dsx-store-readme-content ol,
+.dsx-store-readme-content blockquote,
+.dsx-store-readme-content pre,
+.dsx-store-readme-content table {
+  margin: 8px 0;
+}
+
+/* Inline + fenced code. GitHub READMEs use fenced code for install snippets; a
+   tinted block with wrapping keeps long lines readable in a narrow pane. */
+.dsx-store-readme-content code {
+  font-family: var(--dsw-alias-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12.5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.1));
+}
+
+.dsx-store-readme-content pre {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.1));
+  overflow-x: auto;
+}
+
+.dsx-store-readme-content pre code {
+  padding: 0;
+  background: transparent;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* GitHub README tables: bordered, header row tinted, cells padded. The pane
+   is narrow, so let wide tables scroll horizontally inside their own box. */
+.dsx-store-readme-content table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+
+.dsx-store-readme-content th,
+.dsx-store-readme-content td {
+  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  padding: 5px 10px;
+  text-align: left;
+}
+
+.dsx-store-readme-content th {
+  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.08));
+  font-weight: 600;
+}
+
+/* Blockquote: a left rule + muted text, the GitHub README callout look. */
+.dsx-store-readme-content blockquote {
+  padding: 4px 12px;
+  border-left: 3px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.3));
+  color: var(--dsw-alias-text-secondary, #6b7280);
+}
+
+/* Links pick up the app accent; the sanitizer's afterSanitizeAttributes hook
+   already set target/rel on external ones. */
+.dsx-store-readme-content a {
+  color: var(--dsw-alias-color-accent, #2563eb);
+  text-decoration: none;
+}
+
+.dsx-store-readme-content a:hover {
+  text-decoration: underline;
+}
+
+/* Lists need padding so bullets/numbers aren't clipped at the pane edge. */
+.dsx-store-readme-content ul,
+.dsx-store-readme-content ol {
+  padding-left: 22px;
+}
+
+/* <details> blocks (collapsible README sections) read as a subtle card. */
+.dsx-store-readme-content details {
+  padding: 8px 12px;
+  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+.dsx-store-readme-content summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+/* ── task / error dialog ────────────────────────────────────────────────────
+   Shared by the store and manager tabs. The bar is indeterminate on purpose:
+   the bridge answers an install with one response at the end, so there is no
+   percentage to honour — the sweep says "still working" without inventing a
+   number. */
+.dsx-task {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0 2px;
+}
+
+.dsx-task-bar {
+  position: relative;
+  overflow: hidden;
+  height: 4px;
+  border-radius: 999px;
+  /* `interactive-bg-hover` is one of the alias tokens this theme really defines
+     (a faint wash on both light and dark), which the `fill-*` family is not. */
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.16));
+}
+
+/* Indeterminate sweep. Deliberately translucent: `brand-primary` is the theme's
+   ink (near-black on light, near-white on dark), and at full strength a bar with
+   nothing to measure reads as a solid black slab rather than "working". */
+.dsx-task-bar-fill {
+  position: absolute;
+  inset-block: 0;
+  width: 38%;
+  border-radius: 999px;
+  background: var(--dsw-alias-brand-primary, #4d6bfe);
+  opacity: 0.35;
+  animation: dsx-task-sweep 1.15s ease-in-out infinite;
+}
+
+/* Real byte progress: the width IS the value, so full strength and no sweep. */
+.dsx-task-bar-fill.is-determinate {
+  opacity: 1;
+  animation: none;
+  inset-inline-start: 0;
+  transition: width 0.2s ease-out;
+}
+
+@keyframes dsx-task-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(263%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* An indeterminate bar carries no value, so with motion suppressed there is
+     nothing honest left to draw — leave the track empty and let the step label
+     and the elapsed clock carry "still working". Anything else here becomes a
+     static slab that either lies about progress or just looks like a black bar. */
+  .dsx-task-bar-fill:not(.is-determinate) {
+    display: none;
+  }
+}
+
+.dsx-task-step {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsx-task-elapsed {
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsx-task-error {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dsx-task-error-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsx-task-error-detail {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.24));
+  border-radius: 8px;
+  background: var(--dsw-alias-fill-quaternary, rgba(127, 127, 127, 0.08));
+  font-family: var(--dsw-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
 }

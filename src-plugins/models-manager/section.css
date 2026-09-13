@@ -1,0 +1,53 @@
+/* Models section: compact tabs matching the plugins section chrome. */
+
+/*
+ * The settings nav is built from the raw slot ledger, not the shadowing
+ * projection, so a section that shadows the native `models` entry would list
+ * a second "模型" row. This entry registers with an empty label and hides
+ * itself here; the native row stays visible and selects the same id, which
+ * resolves to this shadow winner at render time.
+ */
+[class*="navList"] > [class*="navCell"]:has(> [class*="navLabel"]:empty) {
+  display: none;
+}
+
+.dsx-models-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 760px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-models-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.dsx-models-tab {
+  position: relative;
+  padding: 8px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-family: inherit;
+  font-size: var(--dsw-font-s-14-font-size);
+  cursor: pointer;
+}
+
+.dsx-models-tab:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-models-tab[data-active="true"] {
+  color: var(--dsw-alias-brand-primary);
+  border-bottom-color: var(--dsw-alias-brand-primary);
+}
+
+.dsx-models-tab:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
