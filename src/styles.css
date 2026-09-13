@@ -101,8 +101,6 @@ body {
   font-size: 11px;
   white-space: nowrap;
   cursor: pointer;
-  /* 拖拽区里的按钮：不声明 no-drag 的话点击会被当作拖窗口吞掉。 */
-  -webkit-app-region: no-drag;
 }
 
 .titlebar .brand-version:hover {

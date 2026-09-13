@@ -238,10 +238,12 @@ function Shell() {
             DeepSeek Harness
           </span>
           {appVersion !== "" && (
+            /* 注意：这里不能带 data-tauri-drag-region。Tauri 只看光标下那个
+               元素带不带这个属性，带上之后按下就被当成拖窗口，click 永远不来。
+               外面那层 titlebar 的拖拽区不受影响。 */
             <button
               className="brand-version"
               data-ready={updateReady}
-              data-tauri-drag-region
               title={updateReady ? "有新版本可用" : "版本与更新"}
               onClick={() => setUpdateOpen((open) => !open)}
             >
