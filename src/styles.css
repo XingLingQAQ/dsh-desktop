@@ -87,12 +87,16 @@ body {
   white-space: nowrap;
 }
 
-/* 版本号同时是更新入口：点开它下面那个弹窗。 */
+/* 版本号同时是更新入口：点开它下面那个弹窗。
+   命中区做得比字大一圈——它只有 40px 宽，贴着就是标题栏的拖拽区，按偏一点
+   就变成拖窗口，看起来就像"点了没反应"。 */
 .titlebar .brand-version {
   position: relative;
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
+  min-height: 24px;
+  margin-left: -8px;
+  padding: 0 10px;
   border: none;
   border-radius: 999px;
   background: transparent;
@@ -111,8 +115,8 @@ body {
 /* 有新版时的角标：这是自动检查唯一的出口，所以它得在不打开弹窗时也看得见。 */
 .titlebar .brand-versionDot {
   position: absolute;
-  top: 1px;
-  right: 2px;
+  top: 2px;
+  right: 4px;
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -846,9 +850,14 @@ body {
 
 /* ============ 更新弹窗 ============ */
 /* 挂在标题栏版本号下面的小窗，内容由壳自己渲染（不经过 DSH 页面）。 */
+/* 点别处收起。只盖标题栏以下的区域：盖住整窗的话，更新弹窗开着的时候标题栏上
+   的窗口按钮和设置按钮第一下都只会被用来关弹窗。 */
 .upd-scrim {
   position: absolute;
-  inset: 0;
+  top: var(--titlebar-height);
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 110;
 }
 
