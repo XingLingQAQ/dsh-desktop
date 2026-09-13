@@ -4,7 +4,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { DeepSeekLogo } from "./components/DeepSeekLogo";
-import { UpdatePopup } from "./components/UpdatePopup";
 import { applyTheme, type ThemeSnapshot } from "./theme";
 import "./styles.css";
 
@@ -107,9 +106,9 @@ function Shell() {
   const [exportPath, setExportPath] = useState<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<"general" | "diagnostics">("general");
   const [appVersion, setAppVersion] = useState("");
-  const [updateOpen, setUpdateOpen] = useState(false);
-  // Set by the popup's own startup check, which runs whether or not anyone
-  // opens it. The chip is the only place it surfaces.
+  // Set by a check that runs at startup, unprompted, and reported on the chip:
+  // the popup itself lives in another window (see update-popup.tsx), so the
+  // answer to "is there a new version" has to reach the title bar from here.
   const [updateReady, setUpdateReady] = useState(false);
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const [currentDir, setCurrentDir] = useState("C:\\\\");
@@ -174,6 +173,29 @@ function Shell() {
     return () => {
       disposed = true;
       un.then((fn) => fn());
+    };
+  }, []);
+
+  // The startup check. Delayed rather than run at mount: this shares the main
+  // thread with the splash handoff and the arrival of the DSH webview, and a
+  // network round trip racing those is not worth the seconds it could cost. It
+  // is silent on failure — nobody asked for it, so an unreachable release host
+  // must not put an error in front of someone who never opened the popup — but
+  // a yes does reach the chip as a dot.
+  useEffect(() => {
+    let disposed = false;
+    const timer = window.setTimeout(() => {
+      void invoke<{ client: { available: boolean } }>("check_updates")
+        .then((report) => {
+          if (!disposed) setUpdateReady(report.client.available);
+        })
+        .catch(() => {
+          /* silent by design */
+        });
+    }, 4000);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
     };
   }, []);
 
@@ -245,7 +267,7 @@ function Shell() {
               className="brand-version"
               data-ready={updateReady}
               title={updateReady ? "有新版本可用" : "版本与更新"}
-              onClick={() => setUpdateOpen((open) => !open)}
+              onClick={() => void invoke("open_update_popup")}
             >
               v{appVersion}
               {updateReady && <span className="brand-versionDot" aria-hidden="true" />}
@@ -323,14 +345,6 @@ function Shell() {
             )}
           </div>
         )}
-        <UpdatePopup
-          open={updateOpen}
-          onClose={() => setUpdateOpen(false)}
-          version={appVersion}
-          settings={settings}
-          onSettings={(patch) => setSettings((current) => ({ ...current, ...patch }))}
-          onAvailable={setUpdateReady}
-        />
         {folderPickerOpen && (
           <div className="folder-picker-overlay" onClick={() => setFolderPickerOpen(false)}>
             <div className="folder-picker" onClick={(e) => e.stopPropagation()}>

@@ -242,6 +242,14 @@ fn export_diagnostics(
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// The command must be async: a synchronous one runs on the event-loop thread,
+/// and `WebviewWindowBuilder::build()` dispatches to that same thread and waits
+/// — which deadlocks the whole app.
+#[tauri::command]
+async fn open_update_popup(app: tauri::AppHandle) -> Result<(), String> {
+    show_update_popup(&app)
+}
+
 /// 排空 host 进程事件通道里开机之后积压的 stdout/stderr 行。
 ///
 /// 开机就绪循环拿到 Ready 行后就退出,此后 host 的所有输出(含 cordis HMR
@@ -381,6 +389,81 @@ fn enter_main(app: &tauri::AppHandle) {
     } else {
         eprintln!("dsh-desktop: main window NOT FOUND in enter_main");
     }
+}
+
+/// Show the update popup under the version chip.
+///
+/// It is a window of its own rather than a layer in the shell page because the
+/// DSH UI is a second, native webview placed over the shell's from the title bar
+/// down: anything the shell draws below the title bar is behind it. A separate
+/// always-on-top window is above both, the same trick the tray menu uses.
+///
+/// The window hides itself when it loses focus, which is what stands in for the
+/// scrim a popover would normally use to catch clicks outside it.
+fn show_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
+    let main = app.get_window("main").ok_or("主窗口不存在")?;
+    let scale = main.scale_factor().unwrap_or(1.0);
+    let origin = main.outer_position().map_err(|e| e.to_string())?;
+    // Just under the version chip, which sits at the left of the title bar.
+    let position = tauri::PhysicalPosition::new(
+        origin.x + (12.0 * scale) as i32,
+        origin.y + ((TITLEBAR_HEIGHT + 6.0) * scale) as i32,
+    );
+
+    let popup = match app.get_webview_window("update-popup") {
+        // The chip toggles: a second click closes it. The window also hides
+        // itself when it loses focus, but a toggle that does not depend on
+        // focus events is what makes the chip's behaviour predictable.
+        Some(win) if win.is_visible().unwrap_or(false) => {
+            let _ = win.hide();
+            return Ok(());
+        }
+        Some(win) => win,
+        None => {
+            let built = WebviewWindowBuilder::new(
+                app,
+                "update-popup",
+                WebviewUrl::App("update-popup.html".into()),
+            )
+            .inner_size(348.0, 400.0)
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .visible(false)
+            .transparent(false)
+            .build()
+            .map_err(|e| format!("创建更新窗口失败: {e}"))?;
+
+            // 透明渲染在软件合成下不可靠，所以窗口不透明、圆角交给区域裁剪。
+            if let Some(window) = app.get_window("update-popup") {
+                apply_rounded_region_r(&window, 12.0);
+            }
+            let hide_on_blur = built.clone();
+            built.on_window_event(move |event| {
+                if let WindowEvent::Focused(false) = event {
+                    // A blur arrives while the window is still being created,
+                    // before it has ever been shown, so the hide waits a moment
+                    // and then checks rather than trusting the event alone.
+                    let window = hide_on_blur.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(250));
+                        if window.is_visible().unwrap_or(false)
+                            && !window.is_focused().unwrap_or(false)
+                        {
+                            let _ = window.hide();
+                        }
+                    });
+                }
+            });
+            built
+        }
+    };
+
+    let _ = popup.set_position(position);
+    let _ = popup.show();
+    let _ = popup.set_focus();
+    Ok(())
 }
 
 /// Show the custom tray menu popup near the tray icon.
@@ -859,6 +942,7 @@ pub fn run() {
             set_workspace_folder,
             set_update_settings,
             get_app_version,
+            open_update_popup,
             check_updates,
             install_harness_update,
             install_client_update,
