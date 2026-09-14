@@ -154,28 +154,43 @@ function UpdatePopup() {
     await invoke<ShellSettings>("set_harness_channel", { channel: next });
   }, []);
 
-  const check = useCallback(async () => {
-    setChecking(true);
-    setNotice(null);
+  // The cheap pass paints the last answer (almost always there — the shell
+  // checks at startup for the version chip), and never shows a spinner: it is
+  // reading a cache, not waiting on anything.
+  const loadCached = useCallback(async () => {
     try {
-      setReport(await invoke<UpdateReport>("check_updates"));
+      setReport(await invoke<UpdateReport>("check_updates", { refresh: false }));
     } catch (error) {
       setNotice(String(error));
-    } finally {
-      setChecking(false);
     }
   }, []);
 
-  // The shell says when this window has been put on screen; that is the moment
-  // to look again, since the report from last time is as old as that look.
+  // The real check. `indicator` is false for the one that runs behind a window
+  // that already has an answer on screen — showing "检查中…" there, over content
+  // that is already correct, is what makes a fast window look slow.
+  const refresh = useCallback(async (indicator: boolean) => {
+    if (indicator) setChecking(true);
+    try {
+      setReport(await invoke<UpdateReport>("check_updates", { refresh: true }));
+      setNotice(null);
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      if (indicator) setChecking(false);
+    }
+  }, []);
+
+  // The shell says when this window has been put on screen. Between opens it
+  // stays alive, so there is no mount to hang a check on and the report from
+  // last time is as old as that look.
   useEffect(() => {
     const un = listen("update-popup-shown", () => {
-      void check();
+      void loadCached().then(() => refresh(false));
     });
     return () => {
       un.then((fn) => fn());
     };
-  }, [check]);
+  }, [loadCached, refresh]);
 
   const installClient = async () => {
     setBusy("client");
@@ -266,7 +281,11 @@ function UpdatePopup() {
       )}
 
       <div className="upd-actions">
-        <button className="upd-button" disabled={checking || busy !== null} onClick={() => void check()}>
+        <button
+          className="upd-button"
+          disabled={checking || busy !== null}
+          onClick={() => void refresh(true)}
+        >
           {checking ? "检查中…" : "检查更新"}
         </button>
         {client?.available && (

@@ -144,7 +144,7 @@ fn version_cmp(a: &str, b: &str) -> Ordering {
 
 // ── harness ──────────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct HarnessUpdate {
     /// Version of the bundle the app is currently running.
     pub current: Option<String>,
@@ -245,7 +245,7 @@ fn check_harness(channel: &str) -> HarnessUpdate {
 
 // ── shell ────────────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct ClientUpdate {
     /// Version this build reports (tauri.conf.json), which is what the manifest
     /// is compared against.
@@ -257,10 +257,24 @@ pub struct ClientUpdate {
     pub error: Option<String>,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct UpdateReport {
     pub harness: HarnessUpdate,
     pub client: ClientUpdate,
+}
+
+/// The last report any check produced.
+///
+/// A check takes seconds — it is a registry read plus a signed manifest over the
+/// network — and the popup would otherwise open onto "尚未检查" and fill in later,
+/// which reads as the window being slow when it is really the network. The shell
+/// already checks on startup for the version chip's dot, so by the time anyone
+/// clicks there is almost always an answer waiting here; the popup paints that
+/// and refreshes behind it.
+pub type SharedReport = Arc<Mutex<Option<UpdateReport>>>;
+
+pub fn new_shared_report() -> SharedReport {
+    Arc::new(Mutex::new(None))
 }
 
 /// Build Tauri's updater. Both halves come from the build itself: the address
@@ -300,27 +314,10 @@ fn settings_snapshot(app: &tauri::AppHandle) -> AppSettings {
     guard.clone()
 }
 
-/// Check both update sources. One being unreachable never hides the other: each
-/// half reports its own error.
-#[tauri::command]
-pub async fn check_updates(app: tauri::AppHandle) -> UpdateReport {
-    let settings = settings_snapshot(&app);
-    let channel = settings
-        .harness_channel
-        .clone()
-        .filter(|c| HARNESS_CHANNELS.contains(&c.as_str()))
-        .unwrap_or_else(|| HARNESS_CHANNELS[0].to_string());
-
-    // curl is a blocking subprocess; keep it off the async worker.
-    let harness = tauri::async_runtime::spawn_blocking(move || check_harness(&channel))
-        .await
-        .unwrap_or_else(|e| HarnessUpdate {
-            error: Some(e.to_string()),
-            ..Default::default()
-        });
-
+/// Check the shell's own release manifest.
+async fn check_client(app: &tauri::AppHandle) -> ClientUpdate {
     let current = app.package_info().version.to_string();
-    let client = match build_updater(&app) {
+    match build_updater(app) {
         Err(message) => ClientUpdate {
             current,
             error: Some(message),
@@ -344,9 +341,44 @@ pub async fn check_updates(app: tauri::AppHandle) -> UpdateReport {
                 error: None,
             },
         },
-    };
+    }
+}
 
-    UpdateReport { harness, client }
+/// Check both halves, newest result wins, and remember it for the next reader.
+/// One being unreachable never hides the other: each reports its own error.
+///
+/// The harness probe is started first and left to run on a blocking thread while
+/// the client check is awaited, so the two network round trips overlap instead of
+/// queueing — they have nothing to do with each other, and in sequence the whole
+/// thing took as long as both.
+#[tauri::command]
+pub async fn check_updates(app: tauri::AppHandle, refresh: bool) -> UpdateReport {
+    let cached = app.state::<SharedReport>().lock().unwrap().clone();
+    if !refresh {
+        if let Some(report) = cached {
+            return report;
+        }
+    }
+
+    let settings = settings_snapshot(&app);
+    let channel = settings
+        .harness_channel
+        .clone()
+        .filter(|c| HARNESS_CHANNELS.contains(&c.as_str()))
+        .unwrap_or_else(|| HARNESS_CHANNELS[0].to_string());
+
+    // curl is a blocking subprocess; keep it off the async worker. Started here
+    // so it is already running when the client check below awaits.
+    let harness_job = tauri::async_runtime::spawn_blocking(move || check_harness(&channel));
+    let client = check_client(&app).await;
+    let harness = harness_job.await.unwrap_or_else(|e| HarnessUpdate {
+        error: Some(e.to_string()),
+        ..Default::default()
+    });
+
+    let report = UpdateReport { harness, client };
+    *app.state::<SharedReport>().lock().unwrap() = Some(report.clone());
+    report
 }
 
 /// Install a harness version into this desktop's own runtime. Long (an npm

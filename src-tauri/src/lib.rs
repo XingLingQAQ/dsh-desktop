@@ -248,12 +248,21 @@ fn export_diagnostics(
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// The command must be async: a synchronous one runs on the event-loop thread,
-/// and `WebviewWindowBuilder::build()` dispatches to that same thread and waits
-/// — which deadlocks the whole app.
+/// The command must be async and must not touch the window itself: this runs on
+/// the async runtime, and every window call from there is a dispatch to the main
+/// thread that blocks until it is served. A synchronous command would run *on*
+/// the main thread, where that same dispatch waits for the thread it is already
+/// on — which deadlocks the whole app (no paint, and every later IPC call hangs).
+/// So the work is handed to the main thread and this returns immediately.
 #[tauri::command]
 async fn open_update_popup(app: tauri::AppHandle) -> Result<(), String> {
-    show_update_popup(&app)
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if let Err(error) = show_update_popup(&handle) {
+            eprintln!("dsh-desktop: open update popup failed: {error}");
+        }
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// 排空 host 进程事件通道里开机之后积压的 stdout/stderr 行。
@@ -433,15 +442,15 @@ fn show_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
     }
 
     let _ = popup.set_position(position);
-    // The region is applied when the window is built; re-apply on show so a
-    // window that was not yet realized then still gets its corners.
-    if let Some(window) = app.get_window("update-popup") {
-        apply_rounded_region_r(&window, POPUP_RADIUS);
-    }
+    // The rounded region is set once when the window is built and lives on the
+    // HWND across hide/show, so it is deliberately NOT re-applied here:
+    // SetWindowRgn invalidates the whole window and forces a repaint at exactly
+    // the moment it is supposed to appear.
     let _ = popup.show();
+    // Focus is taken so the window can be dismissed by clicking elsewhere: the
+    // blur handler below is what stands in for a popover's scrim. This runs on
+    // the main thread (see the command), which is where focus calls belong.
     let _ = popup.set_focus();
-    // The window is kept alive between opens, so its last report is as old as
-    // the last time it was looked at; this is what tells it to look again.
     let _ = app.emit_to(
         tauri::EventTarget::webview_window("update-popup"),
         "update-popup-shown",
@@ -996,11 +1005,13 @@ pub fn run() {
             let guard = Arc::new(AtomicBool::new(false));
             let settings_state = Arc::new(Mutex::new(settings::load()));
             let quitting = Arc::new(AtomicBool::new(false));
+            let report_cache = update::new_shared_report();
             app.manage(state.clone());
             app.manage(host.clone());
             app.manage(guard.clone());
             app.manage(settings_state.clone());
             app.manage(quitting.clone());
+            app.manage(report_cache);
 
             // 桌面插件目录：插件像 U 盘一样放入该目录即可被扫描。解析规则见
             // `store::plugins_root`（开发用仓库根，打包用 APPDATA）——插件商店

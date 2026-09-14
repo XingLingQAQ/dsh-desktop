@@ -181,7 +181,7 @@ function Shell() {
   useEffect(() => {
     let disposed = false;
     const timer = window.setTimeout(() => {
-      void invoke<{ client: { available: boolean } }>("check_updates")
+      void invoke<{ client: { available: boolean } }>("check_updates", { refresh: true })
         .then((report) => {
           if (!disposed) setUpdateReady(report.client.available);
         })
