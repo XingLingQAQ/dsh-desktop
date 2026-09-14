@@ -48,7 +48,9 @@ scripts/installprobe.py
 scripts/make-probe-skill.py
 scripts/patchpoke.py
 scripts/probe-*.js
+scripts/probe-*.ps1
 scripts/probe-*.py
 scripts/verify-*.js
 shot*.png
+popup-*.png
 skills-probe.json

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -104,6 +104,29 @@ function UpdatePopup() {
 
   const close = useCallback(() => {
     void getCurrentWindow().hide();
+  }, []);
+
+  const card = useRef<HTMLDivElement | null>(null);
+
+  // The window hugs its content: the popup is often mostly empty (collapsed
+  // sections, no notes) and a panel taller than what it holds is both dead space
+  // and, once the container can scroll, a scrollbar for nothing. The card is
+  // what gets measured — the scroll container around it is pinned to the window
+  // and cannot report the content's own height.
+  useEffect(() => {
+    const node = card.current;
+    if (node === null) return;
+    let last = 0;
+    const apply = () => {
+      const height = Math.ceil(node.offsetHeight);
+      if (Math.abs(height - last) < 2) return;
+      last = height;
+      void invoke("resize_update_popup", { height });
+    };
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(node);
+    return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
@@ -227,17 +250,22 @@ function UpdatePopup() {
     if (report === null && checking) return "检查中…";
     if (client === undefined) return "尚未检查。";
     if (client.error !== null) return describeClientError(client.error);
-    if (client.available) return `发现新版本 v${client.latest ?? ""}`;
-    return "已是最新版本。";
+    if (client.available) return "有新版本可以安装";
+    return "已是最新版本";
   })();
 
   const harnessStatus = (() => {
     if (harness === undefined) return "尚未检查。";
     if (harness.error !== null) return harness.error;
     if (harness.current === null) return `无法确定当前版本（来源：${harness.source}）`;
-    if (harness.available) return `发现新版本 ${harness.latest ?? ""}`;
+    if (harness.available) return `有新版本 ${harness.latest ?? ""}`;
     return harness.latest === null ? "当前通道没有可用版本。" : `${harness.latest} 已是最新。`;
   })();
+
+  // One tone for the dot and the text, so the two never disagree about what the
+  // line is saying.
+  const clientTone =
+    client?.error != null ? "error" : client?.available ? "new" : client == null ? "muted" : "ok";
 
   const percent =
     progress === null || progress.total === null || progress.total === 0
@@ -246,97 +274,114 @@ function UpdatePopup() {
 
   return (
     <div className="upd-pop">
-      <div className="upd-head">
-        <strong>DSH Desktop</strong>
-        <span className="upd-version">v{client?.current ?? ""}</span>
-        <button className="upd-close" aria-label="关闭" onClick={close}>
-          ✕
-        </button>
-      </div>
-
-      <p className="upd-status" data-tone={client?.available ? "new" : undefined}>
-        {clientStatus}
-      </p>
-
-      {client?.available && client.notes && (
-        <div className="upd-notes">
-          {notesToLines(client.notes).map((line, index) => (
-            <p key={index}>{line}</p>
-          ))}
-        </div>
-      )}
-
-      {progress !== null && (
-        <div className="upd-progress">
-          <div className="upd-bar">
-            <div
-              className="upd-barFill"
-              style={percent === null ? { width: "100%" } : { width: `${percent}%` }}
-            />
-          </div>
-          <span className="upd-progressText">
-            {percent === null ? `已下载 ${formatBytes(progress.chunk)}` : `${percent}%`}
+      {/* 量这一层的高度来决定窗口多高：外面的 .upd-pop 是滚动容器，高度被
+          窗口约束着，量不出内容本身的自然高度。 */}
+      <div className="upd-card" ref={card}>
+        <div className="upd-head">
+          <strong>DSH Desktop</strong>
+          <span className="upd-version">
+            v{client?.current ?? ""}
+            {client?.available && client.latest && (
+              <>
+                <span className="upd-arrow" aria-hidden="true">
+                  →
+                </span>
+                <span className="upd-versionNew">v{client.latest}</span>
+              </>
+            )}
           </span>
-        </div>
-      )}
-
-      <div className="upd-actions">
-        <button
-          className="upd-button"
-          disabled={checking || busy !== null}
-          onClick={() => void refresh(true)}
-        >
-          {checking ? "检查中…" : "检查更新"}
-        </button>
-        {client?.available && (
-          <button
-            className="upd-button primary"
-            disabled={busy !== null}
-            onClick={() => void installClient()}
-          >
-            {busy === "client" ? "下载中…" : "下载并安装"}
+          <button className="upd-close" aria-label="关闭" onClick={close}>
+            <svg viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M2 2 L10 10 M10 2 L2 10" stroke="currentColor" />
+            </svg>
           </button>
+        </div>
+
+        <p className="upd-status" data-tone={clientTone}>
+          <span className="upd-dot" aria-hidden="true" />
+          {clientStatus}
+        </p>
+
+        {client?.available && client.notes && (
+          <div className="upd-notes">
+            {notesToLines(client.notes).map((line, index) => (
+              <p key={index}>{line}</p>
+            ))}
+          </div>
         )}
-      </div>
 
-      {notice !== null && <p className="upd-notice">{notice}</p>}
-
-      {/* 内核默认折起来：这个弹窗先回答「客户端要不要更新」。 */}
-      <details className="upd-more">
-        <summary>DSH 内核</summary>
-        <div className="upd-moreBody">
-          <div className="upd-row">
-            <span className="upd-current">{harness?.current ?? "未检测到"}</span>
-            <span className="upd-status" data-tone={harness?.available ? "new" : undefined}>
-              {harnessStatus}
+        {progress !== null && (
+          <div className="upd-progress">
+            <div className="upd-bar">
+              <div
+                className="upd-barFill"
+                style={percent === null ? { width: "100%" } : { width: `${percent}%` }}
+              />
+            </div>
+            <span className="upd-progressText">
+              {percent === null ? `已下载 ${formatBytes(progress.chunk)}` : `${percent}%`}
             </span>
           </div>
-          <label className="upd-field">
-            <span>更新通道</span>
-            <select
-              value={channel}
-              disabled={busy !== null}
-              onChange={(event) => void setChannelAndSave(event.target.value)}
-            >
-              {CHANNELS.map((entry) => (
-                <option key={entry.value} value={entry.value}>
-                  {entry.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          {harness?.available && harnessLatest !== null && (
+        )}
+
+        <div className="upd-actions">
+          <button
+            className="upd-button outline"
+            disabled={checking || busy !== null}
+            onClick={() => void refresh(true)}
+          >
+            {checking ? "检查中…" : "检查更新"}
+          </button>
+          {client?.available && (
             <button
               className="upd-button primary"
               disabled={busy !== null}
-              onClick={() => void installHarness(harnessLatest)}
+              onClick={() => void installClient()}
             >
-              {busy === "harness" ? "安装中…" : `安装 ${harnessLatest} 并重启`}
+              {busy === "client" ? "下载中…" : "下载并安装"}
             </button>
           )}
-          {log.length > 0 && <pre className="upd-log">{log.join("\n")}</pre>}
         </div>
-      </details>
+
+        {notice !== null && <p className="upd-notice">{notice}</p>}
+
+        {/* 内核默认折起来：这个弹窗先回答「客户端要不要更新」。 */}
+        <details className="upd-more">
+          <summary>DSH 内核</summary>
+          <div className="upd-moreBody">
+            <div className="upd-row">
+              <span className="upd-current">{harness?.current ?? "未检测到"}</span>
+              <span className="upd-status" data-tone={harness?.available ? "new" : undefined}>
+                {harnessStatus}
+              </span>
+            </div>
+            <label className="upd-field">
+              <span>更新通道</span>
+              <select
+                value={channel}
+                disabled={busy !== null}
+                onChange={(event) => void setChannelAndSave(event.target.value)}
+              >
+                {CHANNELS.map((entry) => (
+                  <option key={entry.value} value={entry.value}>
+                    {entry.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {harness?.available && harnessLatest !== null && (
+              <button
+                className="upd-button primary"
+                disabled={busy !== null}
+                onClick={() => void installHarness(harnessLatest)}
+              >
+                {busy === "harness" ? "安装中…" : `安装 ${harnessLatest} 并重启`}
+              </button>
+            )}
+            {log.length > 0 && <pre className="upd-log">{log.join("\n")}</pre>}
+          </div>
+        </details>
+      </div>
     </div>
   );
 }

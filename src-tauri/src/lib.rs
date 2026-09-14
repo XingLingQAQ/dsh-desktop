@@ -54,6 +54,7 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(45);
 /// Update popup window geometry (must match `--popup-*` in styles.css).
 const POPUP_WIDTH: f64 = 372.0;
 const POPUP_HEIGHT: f64 = 424.0;
+const POPUP_MIN_HEIGHT: f64 = 120.0;
 const POPUP_RADIUS: f64 = 12.0;
 
 /// Launch sequence state, polled by the splash page and the shell title bar.
@@ -255,10 +256,14 @@ fn export_diagnostics(
 /// on — which deadlocks the whole app (no paint, and every later IPC call hangs).
 /// So the work is handed to the main thread and this returns immediately.
 #[tauri::command]
-async fn open_update_popup(app: tauri::AppHandle) -> Result<(), String> {
+async fn open_update_popup(
+    app: tauri::AppHandle,
+    anchor_x: Option<f64>,
+    anchor_bottom: Option<f64>,
+) -> Result<(), String> {
     let handle = app.clone();
     app.run_on_main_thread(move || {
-        if let Err(error) = show_update_popup(&handle) {
+        if let Err(error) = show_update_popup(&handle, anchor_x, anchor_bottom) {
             eprintln!("dsh-desktop: open update popup failed: {error}");
         }
     })
@@ -420,15 +425,19 @@ fn enter_main(app: &tauri::AppHandle) {
 /// path only positions and shows it. Building it on the first click made that
 /// click pay for a webview, a page load and a React mount — seconds in dev,
 /// where the modules arrive unbundled.
-fn show_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
+///
+/// `anchor_x` and `anchor_bottom` are the version chip's edges in the shell
+/// page, so the panel opens under the thing that was clicked rather than at a
+/// guessed offset. The horizontal one is clamped to the monitor: a window near
+/// the right edge would otherwise hang its panel off-screen.
+fn show_update_popup(
+    app: &tauri::AppHandle,
+    anchor_x: Option<f64>,
+    anchor_bottom: Option<f64>,
+) -> Result<(), String> {
     let main = app.get_window("main").ok_or("主窗口不存在")?;
     let scale = main.scale_factor().unwrap_or(1.0);
     let origin = main.outer_position().map_err(|e| e.to_string())?;
-    // Just under the version chip, which sits at the left of the title bar.
-    let position = tauri::PhysicalPosition::new(
-        origin.x + (12.0 * scale) as i32,
-        origin.y + ((TITLEBAR_HEIGHT + 6.0) * scale) as i32,
-    );
 
     let Some(popup) = app.get_webview_window("update-popup") else {
         return Err("更新窗口未创建".into());
@@ -440,6 +449,34 @@ fn show_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
         let _ = popup.hide();
         return Ok(());
     }
+
+    // The page does not start at the window's top-left on Windows — even a
+    // frameless window carries a non-client frame — so a position taken
+    // straight from the chip's coordinates lands the panel a few pixels off.
+    // The window knows both corners, so ask it instead of guessing a constant.
+    let frame = match (popup.outer_position(), popup.inner_position()) {
+        (Ok(outer), Ok(inner)) => (inner.x - outer.x, inner.y - outer.y),
+        _ => (0, 0),
+    };
+    let outer_width = popup
+        .inner_size()
+        .map(|size| size.width as f64)
+        .unwrap_or(POPUP_WIDTH * scale)
+        + frame.0 as f64;
+
+    let mut left = origin.x as f64 + anchor_x.unwrap_or(12.0) * scale;
+    let top = origin.y as f64 + anchor_bottom.unwrap_or(TITLEBAR_HEIGHT) * scale + 6.0 * scale;
+    if let Ok(Some(monitor)) = main.current_monitor() {
+        let area = monitor.work_area();
+        let margin = 8.0 * scale;
+        let min = area.position.x as f64 + margin;
+        let max = area.position.x as f64 + area.size.width as f64 - outer_width - margin;
+        left = left.clamp(min, max.max(min));
+    }
+    let position = tauri::PhysicalPosition::new(
+        left.round() as i32 - frame.0,
+        top.round() as i32 - frame.1,
+    );
 
     let _ = popup.set_position(position);
     // The rounded region is set once when the window is built and lives on the
@@ -475,6 +512,8 @@ fn prepare_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
         WebviewUrl::App("update-popup.html".into()),
     )
     .inner_size(POPUP_WIDTH, POPUP_HEIGHT)
+    // Left non-resizable on purpose: the height follows the content, and a
+    // window whose edges can be dragged would let the two disagree.
     .decorations(false)
     .always_on_top(true)
     .skip_taskbar(true)
@@ -485,16 +524,26 @@ fn prepare_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| format!("创建更新窗口失败: {e}"))?;
 
     // 透明渲染在软件合成下不可靠，所以窗口不透明、圆角交给区域裁剪。
-    if let Some(window) = app.get_window("update-popup") {
-        apply_rounded_region_r(&window, POPUP_RADIUS);
+    let frame = app.get_window("update-popup");
+    if let Some(window) = &frame {
+        apply_rounded_region_r(window, POPUP_RADIUS);
     }
-    let hide_on_blur = built.clone();
-    built.on_window_event(move |event| {
-        if let WindowEvent::Focused(false) = event {
+    let events = built.clone();
+    built.on_window_event(move |event| match event {
+        // The popup is sized to its content, so its height changes as sections
+        // open and notes appear. The rounded region is in window coordinates and
+        // does not follow a resize on its own — without this the corners would
+        // keep the old clip and cut into the content.
+        WindowEvent::Resized(_) => {
+            if let Some(window) = &frame {
+                apply_rounded_region_r(window, POPUP_RADIUS);
+            }
+        }
+        WindowEvent::Focused(false) => {
             // A blur arrives while the window is still being created, before it
             // has ever been shown, so the hide waits a moment and then checks
             // rather than trusting the event alone.
-            let window = hide_on_blur.clone();
+            let window = events.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(250));
                 if window.is_visible().unwrap_or(false) && !window.is_focused().unwrap_or(false) {
@@ -502,8 +551,48 @@ fn prepare_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
                 }
             });
         }
+        _ => {}
     });
     Ok(())
+}
+
+/// Size the popup to what it currently holds.
+///
+/// It is a fixed-size window that is usually mostly empty (collapsed sections,
+/// no notes), and a panel that is taller than its content is both dead space and
+/// — once the scroll container can scroll — a scrollbar for nothing. The page
+/// measures its own card and calls this whenever that changes, so the window
+/// hugs the content and only scrolls when it genuinely cannot fit.
+///
+/// Width is fixed, height is clamped: never below the smallest useful panel, and
+/// never past the monitor's work area. Same main-thread rule as the open command.
+#[tauri::command]
+async fn resize_update_popup(app: tauri::AppHandle, height: f64) -> Result<(), String> {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let Some(popup) = handle.get_webview_window("update-popup") else {
+            return;
+        };
+        let scale = popup.scale_factor().unwrap_or(1.0);
+        let max = popup
+            .current_monitor()
+            .ok()
+            .flatten()
+            .map(|monitor| (monitor.work_area().size.height as f64 / scale) - 140.0)
+            .unwrap_or(640.0)
+            .max(POPUP_MIN_HEIGHT);
+        let height = height.clamp(POPUP_MIN_HEIGHT, max);
+        // Skip the churn when it is already that size: set_size reports the same
+        // logical size for a fractionally-scaled window slightly differently, and
+        // a resize per measurement would be a loop.
+        if let Ok(current) = popup.inner_size() {
+            if (current.height as f64 / scale - height).abs() < 2.0 {
+                return;
+            }
+        }
+        let _ = popup.set_size(tauri::LogicalSize::new(POPUP_WIDTH, height));
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Show the custom tray menu popup near the tray icon.
@@ -657,15 +746,30 @@ fn apply_rounded_region_r(window: &tauri::Window, radius: f64) {
             eprintln!("dsh-desktop: skip region (suspicious size {w}x{h})");
             return;
         }
+        // 区域是按窗口坐标裁的，而 inner_size 量的是客户区：Windows 上两者
+        // 左上角并不重合（无边框窗口也带一圈非客户区，系统会把它画成灰边）。
+        // 不加这个偏移，区域就会把左边/上边的灰边留在可见范围里、又把右边/
+        // 下边的页面裁掉一截。
+        let frame = match (window.outer_position(), window.inner_position()) {
+            (Ok(outer), Ok(inner)) => (inner.x - outer.x, inner.y - outer.y),
+            _ => (0, 0),
+        };
         let r = radius as i32 * 2; // 椭圆直径 = 2 × 半径
         let Ok(hwnd) = window.hwnd() else {
             return;
         };
         unsafe {
-            let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, r, r);
+            let rgn = CreateRoundRectRgn(
+                frame.0,
+                frame.1,
+                frame.0 + w + 1,
+                frame.1 + h + 1,
+                r,
+                r,
+            );
             if !rgn.is_null() {
                 SetWindowRgn(hwnd.0 as *mut core::ffi::c_void, rgn, 1);
-                eprintln!("dsh-desktop: rounded region applied ({w}x{h}, r={r})");
+                eprintln!("dsh-desktop: rounded region applied ({w}x{h}, r={r}, +{},{})", frame.0, frame.1);
             } else {
                 eprintln!("dsh-desktop: CreateRoundRectRgn failed");
             }
@@ -984,6 +1088,7 @@ pub fn run() {
             get_theme,
             get_app_version,
             open_update_popup,
+            resize_update_popup,
             check_updates,
             install_harness_update,
             install_client_update,

@@ -875,15 +875,31 @@ html.upd-window body {
   background: var(--ds-bg-1);
 }
 
+/* 滚动容器：高度被窗口约束，所以窗口多高它多高；内容比窗口高时才滚。
+   滚动条整条藏掉——这里滚的顶多是一段更新说明，为它留一条槽不值得，
+   滚轮照样管用。 */
 .upd-pop {
   box-sizing: border-box;
   width: 100%;
   height: 100%;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.upd-pop::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 被测量的那一层：窗口高度跟着它的自然高度走（见 update-popup.tsx）。 */
+.upd-card {
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 8px 4px;
+  gap: 6px;
+  padding: 10px 6px;
   background: var(--ds-bg-1);
   color: var(--ds-label);
   font-size: 14px;
@@ -896,18 +912,22 @@ html.upd-window body {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 32px;
-  padding: 0 10px;
+  min-height: 28px;
+  padding: 0 8px;
 }
 
 .upd-head strong {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
-  line-height: 22px;
+  line-height: 20px;
   color: var(--ds-label);
 }
 
+/* 版本号 = 当前 →（可更新时）目标。箭头弱、新版本强，一行里读完新旧。 */
 .upd-version {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   color: var(--ds-label-2);
   font-family: var(--ds-font-mono);
   font-size: 12px;
@@ -915,19 +935,37 @@ html.upd-window body {
   font-variant-numeric: tabular-nums;
 }
 
+.upd-arrow {
+  color: var(--ds-label-3);
+}
+
+.upd-versionNew {
+  color: var(--ds-label);
+  font-weight: 500;
+}
+
+/* 28 见方 = DSH 的 Icon_container，比 22 稳，也够得着。 */
 .upd-close {
   margin-left: auto;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: none;
-  border-radius: 12px;
+  border-radius: 14px;
   background: transparent;
   color: var(--ds-label-2);
-  font-size: 12px;
   cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+/* 和标题栏的窗口按钮同一个图形语言，而不是一个字体里的 ✕。 */
+.upd-close svg {
+  width: 10px;
+  height: 10px;
+  stroke-width: 1.3;
+  fill: none;
 }
 
 .upd-close:hover {
@@ -938,18 +976,51 @@ html.upd-window body {
 /* ── 状态行 ────────────────────────────────────────────────────────────── */
 
 .upd-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   margin: 0;
-  padding: 0 10px;
+  padding: 0 8px;
   font-size: 13px;
   line-height: 20px;
   color: var(--ds-label-2);
   word-break: break-word;
 }
 
-/* 「发现新版本」不用红：DSH 的强调是加重的一级文字，红色留给错误。 */
+/* 状态点：和标题栏的运行状态同一个读法——先看颜色，再读字。 */
+.upd-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ds-label-3);
+}
+
 .upd-status[data-tone="new"] {
   color: var(--ds-label);
   font-weight: 500;
+}
+
+.upd-status[data-tone="new"] .upd-dot {
+  background: var(--ds-brand);
+  box-shadow: 0 0 0 3px var(--ds-hover);
+}
+
+.upd-status[data-tone="ok"] .upd-dot {
+  background: var(--ds-success);
+}
+
+.upd-status[data-tone="error"] {
+  color: var(--ds-error);
+}
+
+.upd-status[data-tone="error"] .upd-dot {
+  background: var(--ds-error);
+}
+
+/* 内核那一行复用的就是 .upd-status，但它在折叠区里，不要缩进两遍。 */
+.upd-row .upd-status {
+  padding: 0;
 }
 
 /* ── 更新说明 / 安装日志 ───────────────────────────────────────────────── */
@@ -957,10 +1028,11 @@ html.upd-window body {
 .upd-notes {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   max-height: 132px;
   overflow-y: auto;
-  margin: 2px 10px 0;
+  scrollbar-width: none;
+  margin: 2px 8px 0;
   padding: 8px 10px;
   background: var(--ds-bg-2);
   border: 1px solid var(--ds-border);
@@ -970,6 +1042,11 @@ html.upd-window body {
   color: var(--ds-label-2);
   word-break: break-word;
   user-select: text;
+}
+
+.upd-notes::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .upd-notes p {
@@ -983,9 +1060,10 @@ html.upd-window body {
 }
 
 .upd-log {
-  margin: 2px 10px 0;
+  margin: 0 8px;
   max-height: 120px;
   overflow-y: auto;
+  scrollbar-width: none;
   padding: 8px 10px;
   background: var(--ds-bg-2);
   border: 1px solid var(--ds-border);
@@ -999,13 +1077,18 @@ html.upd-window body {
   user-select: text;
 }
 
-/* ── 按钮行（DSH 的胶囊按钮几何） ─────────────────────────────────────── */
+.upd-log::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* ── 按钮行（照 DSH Button 的 md：高 36、圆角 18、字 14） ──────────────── */
 
 .upd-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 10px;
+  gap: 6px;
+  padding: 2px 8px;
 }
 
 .upd-button {
@@ -1023,6 +1106,19 @@ html.upd-window body {
   font-size: 14px;
   line-height: 22px;
   cursor: pointer;
+  transition:
+    background 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+/* 「检查更新」用 DSH 的 outline（Dialog 取消键那款）：透明底 + 发丝描边，
+   和实心的主按钮并排时一眼能分出主次。 */
+.upd-button.outline {
+  border: 1px solid var(--ds-border-2);
+}
+
+.upd-button.outline:hover:not(:disabled) {
+  background: var(--ds-hover);
 }
 
 .upd-button:hover:not(:disabled) {
@@ -1032,6 +1128,15 @@ html.upd-window body {
 .upd-button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* 键盘走到哪儿要看得见；鼠标点不给环，免得点一下留一圈。 */
+.upd-button:focus-visible,
+.upd-close:focus-visible,
+.upd-more > summary:focus-visible,
+.upd-field select:focus-visible {
+  outline: 2px solid var(--ds-brand);
+  outline-offset: 1px;
 }
 
 .upd-button.primary {
@@ -1047,33 +1152,35 @@ html.upd-window body {
 
 .upd-more {
   border-top: 1px solid var(--ds-border-2);
-  margin-top: 4px;
-  padding-top: 4px;
+  margin-top: 2px;
+  padding-top: 2px;
 }
 
 .upd-more > summary {
   display: flex;
   align-items: center;
-  height: 24px;
-  padding: 0 10px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
   list-style: none;
   cursor: pointer;
-  font-size: 14px;
-  line-height: 24px;
+  font-size: 13px;
+  line-height: 20px;
   color: var(--ds-label-2);
+  transition: background 0.12s ease;
 }
 
 .upd-more > summary::-webkit-details-marker {
   display: none;
 }
 
-/* 和适配器/DSH 自己的折叠标记同一种画法：靠边框的两条边转出小三角。 */
+/* 和 DSH 自己的折叠标记同一种画法：靠边框的两条边转出小三角。 */
 .upd-more > summary::before {
   content: '';
   flex: none;
-  width: 6px;
-  height: 6px;
-  margin-right: 6px;
+  width: 5px;
+  height: 5px;
+  margin-right: 7px;
   border-right: 1.5px solid currentcolor;
   border-bottom: 1.5px solid currentcolor;
   transform: rotate(-45deg);
@@ -1091,6 +1198,7 @@ html.upd-window body {
 }
 
 .upd-more > summary:hover {
+  background: var(--ds-hover);
   color: var(--ds-label);
 }
 
@@ -1098,7 +1206,7 @@ html.upd-window body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 4px 10px 4px;
+  padding: 4px 8px 6px;
 }
 
 .upd-row {
@@ -1150,7 +1258,7 @@ html.upd-window body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 10px;
+  padding: 0 8px;
 }
 
 .upd-bar {
@@ -1177,7 +1285,7 @@ html.upd-window body {
 
 .upd-notice {
   margin: 0;
-  padding: 0 10px 4px;
+  padding: 0 8px;
   font-size: 13px;
   line-height: 20px;
   color: var(--ds-error);

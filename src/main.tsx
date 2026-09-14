@@ -263,7 +263,16 @@ function Shell() {
               className="brand-version"
               data-ready={updateReady}
               title={updateReady ? "有新版本可用" : "版本与更新"}
-              onClick={() => void invoke("open_update_popup")}
+              /* 弹窗窗口要靠它自己的位置定位：把这一格的边传过去（相对本页面
+                 的坐标），Rust 那边加上主窗口的原点，弹窗才会开在版本号正下方
+                 而不是一个猜的偏移。 */
+              onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                void invoke("open_update_popup", {
+                  anchorX: rect.left,
+                  anchorBottom: rect.bottom,
+                });
+              }}
             >
               v{appVersion}
               {updateReady && <span className="brand-versionDot" aria-hidden="true" />}
