@@ -425,14 +425,22 @@ pub fn new_shared_shell_download() -> SharedShellDownload {
 /// before anything is kept. The bytes stay in memory rather than going out to a
 /// temp file — they are a few megabytes and the process that will run them is
 /// this one, so a file would only be a second copy to clean up.
+///
+/// "Nothing to fetch" is an `Ok` carrying `available: false`, not an error: it
+/// is the ordinary answer most days, and the caller is a button that has to
+/// stay usable either way.
 #[tauri::command]
 pub async fn download_client_update(app: tauri::AppHandle) -> Result<ClientUpdate, String> {
     let updater = build_updater(&app)?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "当前已是最新版本".to_string())?;
+    let update = match updater.check().await.map_err(|e| e.to_string())? {
+        Some(update) => update,
+        None => {
+            return Ok(ClientUpdate {
+                current: app.package_info().version.to_string(),
+                ..Default::default()
+            })
+        }
+    };
 
     let handle = app.clone();
     let bytes = update

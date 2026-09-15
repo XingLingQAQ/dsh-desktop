@@ -223,14 +223,24 @@ function UpdatePopup() {
   // Fetch the shell update. The bytes are verified as they arrive (the manifest
   // signature is checked against the key in this build), so once this returns
   // the update is ready to apply and applying it needs no network at all.
-  const downloadClient = async () => {
+  //
+  // It is deliberately not built on the last report: "没有更新" is a statement
+  // about the moment it was made, and the one thing a person pressing a button
+  // called 检查并更新 expects is a fresh look. Only a real failure — an
+  // unreachable host, a manifest that will not parse — lands in the notice, and
+  // then the button is back so it can be pressed again.
+  const checkAndDownload = async () => {
+    if (hasPayload) {
+      await installClient();
+      return;
+    }
     setBusy("download");
     setNotice(null);
     setProgress({ chunk: 0, total: null });
     try {
       const next = await invoke<ClientUpdate>("download_client_update");
       setReport((current) => (current === null ? current : { ...current, client: next }));
-      setDownloaded(next.latest);
+      setDownloaded(next.available ? next.latest : null);
       setProgress(null);
       setBusy(null);
     } catch (error) {
@@ -247,6 +257,7 @@ function UpdatePopup() {
   const installClient = async () => {
     setBusy("install");
     setNotice(null);
+    setProgress(null);
     await new Promise((resolve) => setTimeout(resolve, 500));
     try {
       // Never returns on success: the installer takes over and relaunches.
@@ -274,6 +285,10 @@ function UpdatePopup() {
   const client = report?.client;
   const harness = report?.harness;
   const harnessLatest = harness?.latest ?? null;
+  // A payload is waiting only for the version that is still being offered: if
+  // the check has since found something newer, or a newer one was fetched, the
+  // stale download is not what the button should offer to install.
+  const hasPayload = downloaded !== null && client?.latest === downloaded;
 
   const clientStatus = (() => {
     if (report === null && checking) return "检查中…";
@@ -361,32 +376,28 @@ function UpdatePopup() {
           >
             {checking ? "检查中…" : "检查更新"}
           </button>
-          {/* 一个位置、两种动作：有包了才是「安装」。下载完之前不摆安装按钮，
-              免得点下去发现没东西可装。 */}
-          {client?.available &&
-            (downloaded !== null && downloaded === client.latest ? (
-              <button
-                className="upd-button primary"
-                disabled={busy !== null}
-                onClick={() => void installClient()}
-              >
-                {busy === "install" && <span className="upd-spinner" aria-hidden="true" />}
-                {busy === "install" ? "正在安装…" : "安装并重启"}
-              </button>
-            ) : (
-              <button
-                className="upd-button primary"
-                disabled={busy !== null}
-                onClick={() => void downloadClient()}
-              >
-                {busy === "download" && <span className="upd-spinner" aria-hidden="true" />}
-                {busy === "download"
-                  ? percent === null
-                    ? "下载中…"
-                    : `下载中… ${percent}%`
-                  : "下载更新"}
-              </button>
-            ))}
+          {/* 「检查更新」和「检查并更新」是同一个位置、同一件事：按下去都是
+              先查一次，查到才有得下。所以查到之前按钮不换、不禁用——凭当前
+              这份报告把按钮藏起来，碰到没查到（清单暂时取不到）就等于把人堵
+              在门口，连再试一次都点不动。主按钮一直在，点了自己会说话。 */}
+          <button
+            className="upd-button primary"
+            disabled={checking || busy !== null}
+            onClick={() => void checkAndDownload()}
+          >
+            {(checking || busy !== null) && <span className="upd-spinner" aria-hidden="true" />}
+            {/* 没有进度就还没开始下（正在查），有进度就是真在下了——比拿
+                busy 猜更准。 */}
+            {busy === "install"
+              ? "正在安装…"
+              : checking || busy === "download"
+                ? percent === null
+                  ? "检查中…"
+                  : `下载中… ${percent}%`
+                : hasPayload
+                  ? "安装并重启"
+                  : "检查并更新"}
+          </button>
         </div>
 
         {notice !== null && <p className="upd-notice">{notice}</p>}
