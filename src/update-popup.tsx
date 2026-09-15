@@ -97,10 +97,15 @@ function UpdatePopup() {
 
   const [report, setReport] = useState<UpdateReport | null>(null);
   const [checking, setChecking] = useState(false);
-  const [busy, setBusy] = useState<"client" | "harness" | null>(null);
+  const [busy, setBusy] = useState<"download" | "install" | "harness" | null>(null);
   const [log, setLog] = useState<string[]>([]);
   const [progress, setProgress] = useState<{ chunk: number; total: number | null } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // The version whose payload is already on disk and verified. Downloading and
+  // applying are two clicks on purpose: fetching a few megabytes can happen
+  // while the app is being used, but applying one replaces this process, so it
+  // waits to be asked.
+  const [downloaded, setDownloaded] = useState<string | null>(null);
 
   const close = useCallback(() => {
     void getCurrentWindow().hide();
@@ -215,10 +220,34 @@ function UpdatePopup() {
     };
   }, [loadCached, refresh]);
 
-  const installClient = async () => {
-    setBusy("client");
+  // Fetch the shell update. The bytes are verified as they arrive (the manifest
+  // signature is checked against the key in this build), so once this returns
+  // the update is ready to apply and applying it needs no network at all.
+  const downloadClient = async () => {
+    setBusy("download");
     setNotice(null);
-    setProgress(null);
+    setProgress({ chunk: 0, total: null });
+    try {
+      const next = await invoke<ClientUpdate>("download_client_update");
+      setReport((current) => (current === null ? current : { ...current, client: next }));
+      setDownloaded(next.latest);
+      setProgress(null);
+      setBusy(null);
+    } catch (error) {
+      setNotice(String(error));
+      setProgress(null);
+      setBusy(null);
+    }
+  };
+
+  // Apply it. On Windows this ends the process and the installer relaunches the
+  // app, so the button's own state is the last thing anyone sees: the pause
+  // before the call is there so "正在安装…" is actually painted rather than
+  // being cut off by the exit it is describing.
+  const installClient = async () => {
+    setBusy("install");
+    setNotice(null);
+    await new Promise((resolve) => setTimeout(resolve, 500));
     try {
       // Never returns on success: the installer takes over and relaunches.
       await invoke("install_client_update");
@@ -332,15 +361,32 @@ function UpdatePopup() {
           >
             {checking ? "检查中…" : "检查更新"}
           </button>
-          {client?.available && (
-            <button
-              className="upd-button primary"
-              disabled={busy !== null}
-              onClick={() => void installClient()}
-            >
-              {busy === "client" ? "下载中…" : "下载并安装"}
-            </button>
-          )}
+          {/* 一个位置、两种动作：有包了才是「安装」。下载完之前不摆安装按钮，
+              免得点下去发现没东西可装。 */}
+          {client?.available &&
+            (downloaded !== null && downloaded === client.latest ? (
+              <button
+                className="upd-button primary"
+                disabled={busy !== null}
+                onClick={() => void installClient()}
+              >
+                {busy === "install" && <span className="upd-spinner" aria-hidden="true" />}
+                {busy === "install" ? "正在安装…" : "安装并重启"}
+              </button>
+            ) : (
+              <button
+                className="upd-button primary"
+                disabled={busy !== null}
+                onClick={() => void downloadClient()}
+              >
+                {busy === "download" && <span className="upd-spinner" aria-hidden="true" />}
+                {busy === "download"
+                  ? percent === null
+                    ? "下载中…"
+                    : `下载中… ${percent}%`
+                  : "下载更新"}
+              </button>
+            ))}
         </div>
 
         {notice !== null && <p className="upd-notice">{notice}</p>}

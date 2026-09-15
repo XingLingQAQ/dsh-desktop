@@ -399,22 +399,44 @@ pub async fn install_harness_update(
     .map_err(|e| e.to_string())?
 }
 
-/// Download and install a shell update, then let the installer relaunch the app.
+/// A shell update that has been fetched and verified, waiting to be applied.
 ///
-/// Tauri's updater verifies the manifest signature before installing and, on
-/// Windows, exits the process once the installer is running — so this command
-/// does not return on success.
+/// Download and apply are separate commands so the fetch can run while the app
+/// stays usable: the popup shows a progress bar, and applying it — which ends
+/// this process — is a second, deliberate click rather than something that
+/// happens the moment the bytes land. Both halves of the pair are kept, because
+/// applying needs the manifest entry the bytes were verified against.
+pub struct DownloadedShell {
+    update: Update,
+    bytes: Vec<u8>,
+    version: String,
+}
+
+pub type SharedShellDownload = Arc<Mutex<Option<DownloadedShell>>>;
+
+pub fn new_shared_shell_download() -> SharedShellDownload {
+    Arc::new(Mutex::new(None))
+}
+
+/// Fetch the shell update and hold it, verified, until it is applied.
+///
+/// Verification happens inside Tauri's own download: the signature from the
+/// release manifest is checked against the public key baked into this build
+/// before anything is kept. The bytes stay in memory rather than going out to a
+/// temp file — they are a few megabytes and the process that will run them is
+/// this one, so a file would only be a second copy to clean up.
 #[tauri::command]
-pub async fn install_client_update(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn download_client_update(app: tauri::AppHandle) -> Result<ClientUpdate, String> {
     let updater = build_updater(&app)?;
-    let update: Update = updater
+    let update = updater
         .check()
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "当前已是最新版本".to_string())?;
+
     let handle = app.clone();
-    update
-        .download_and_install(
+    let bytes = update
+        .download(
             move |chunk: usize, total: Option<u64>| {
                 let _ = handle.emit(
                     "update-progress",
@@ -424,5 +446,44 @@ pub async fn install_client_update(app: tauri::AppHandle) -> Result<(), String> 
             || {},
         )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    let version = update.version.clone();
+    let body = update.body.clone();
+    *app.state::<SharedShellDownload>().lock().unwrap() = Some(DownloadedShell {
+        update,
+        bytes,
+        version: version.clone(),
+    });
+
+    Ok(ClientUpdate {
+        current: app.package_info().version.to_string(),
+        latest: Some(version),
+        notes: body,
+        available: true,
+        error: None,
+    })
+}
+
+/// Apply the update fetched by \ref download_client_update.
+///
+/// Nothing is fetched here, so this needs no network and cannot fail on one —
+/// the bytes were verified when they were downloaded. On Windows Tauri hands
+/// the installer to the shell and exits this process; the installer puts the
+/// new version in place and relaunches the app. That is why this does not
+/// return on success, and why "nothing downloaded yet" is a real error rather
+/// than a reason to go and fetch one now.
+#[tauri::command]
+pub async fn install_client_update(app: tauri::AppHandle) -> Result<(), String> {
+    let downloaded = app
+        .state::<SharedShellDownload>()
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| "更新还没有下载完成".to_string())?;
+
+    downloaded
+        .update
+        .install(&downloaded.bytes)
+        .map_err(|e| format!("安装 {} 失败: {e}", downloaded.version))
 }

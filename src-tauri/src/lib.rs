@@ -41,7 +41,9 @@ use crate::plugins::PluginManager;
 use crate::settings::AppSettings;
 use crate::host::{http_get_ok, probe_existing, HostEvent, HostProcess};
 use crate::provision::provision;
-use crate::update::{check_updates, install_client_update, install_harness_update};
+use crate::update::{
+    check_updates, download_client_update, install_client_update, install_harness_update,
+};
 
 /// Height of the custom title bar in the shell page (must match `--titlebar-height`).
 const TITLEBAR_HEIGHT: f64 = 46.0;
@@ -1091,6 +1093,7 @@ pub fn run() {
             resize_update_popup,
             check_updates,
             install_harness_update,
+            download_client_update,
             install_client_update,
             restart_app,
             export_diagnostics,
@@ -1117,6 +1120,7 @@ pub fn run() {
             app.manage(settings_state.clone());
             app.manage(quitting.clone());
             app.manage(report_cache);
+            app.manage(update::new_shared_shell_download());
 
             // 桌面插件目录：插件像 U 盘一样放入该目录即可被扫描。解析规则见
             // `store::plugins_root`（开发用仓库根，打包用 APPDATA）——插件商店

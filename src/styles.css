@@ -1148,6 +1148,29 @@ html.upd-window body {
   background: rgb(67, 69, 74);
 }
 
+/* 主按钮里的转圈：白底按钮上用当前字色（反白）画，尺寸跟着 14 号字走。 */
+.upd-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid currentcolor;
+  border-top-color: transparent;
+  animation: upd-spin 0.7s linear infinite;
+}
+
+@keyframes upd-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .upd-spinner {
+    animation-duration: 2s;
+  }
+}
+
 /* ── 折叠区（照 DSH 的 DisclosureRow） ────────────────────────────────── */
 
 .upd-more {
