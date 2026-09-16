@@ -505,24 +505,39 @@ fn show_update_popup(
     // SetWindowRgn invalidates the whole window and forces a repaint at exactly
     // the moment it is supposed to appear.
     let _ = popup.show();
-    // Focus is requested so Escape reaches the page when the window manager does
-    // grant it; nothing depends on it succeeding.
-    let _ = popup.set_focus();
     force_foreground(&popup);
     let _ = app.emit_to(
         tauri::EventTarget::webview_window("update-popup"),
         "update-popup-shown",
         (),
     );
-    // The hook goes on last, once the window is actually on screen at its final
-    // position. Installing it before the window is up means the first event it
-    // sees is compared against a rectangle that is not where the panel ended up,
-    // which reads as "the press was outside" and closes the thing that was just
-    // opened. `is_visible` is the guard for that, but not believing a stale
-    // rectangle is the real fix — the window is brought up first, then watched.
-    watch_outside_click(popup);
     Ok(())
 }
+
+/// 让窗口不抢激活、但能接收鼠标（WS_EX_NOACTIVATE，系统菜单就是这么做的）。
+///
+/// 这个窗口是置顶 + 不在任务栏的，Windows 本来就不给它前台；强行要它激活会
+/// 掉进一个死循环：拿到激活 → 立刻又被系统收回 → 收到"失活"消息 → 于是关掉
+/// 自己。既然它不需要键盘（Escape 由页面处理），那就干脆不要激活权——不激活
+/// 就没有失活，弹窗就不会自己消失；焦点始终留在主窗口上，点别处时主窗口照样
+/// 收到点击，由那边负责把弹窗关掉。
+#[cfg(target_os = "windows")]
+fn make_non_activating(hwnd: isize) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+    };
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd as *mut core::ffi::c_void, GWL_EXSTYLE);
+        SetWindowLongPtrW(
+            hwnd as *mut core::ffi::c_void,
+            GWL_EXSTYLE,
+            ex | WS_EX_NOACTIVATE as isize,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn make_non_activating(_hwnd: isize) {}
 
 /// Ask the window manager to make `window` the foreground window.
 ///
@@ -544,141 +559,6 @@ fn force_foreground(window: &tauri::WebviewWindow) {
 
 #[cfg(not(target_os = "windows"))]
 fn force_foreground(_window: &tauri::WebviewWindow) {}
-
-/// Hide the popup as soon as a press lands outside it.
-///
-/// Focus is the obvious signal for "clicked elsewhere" and does not work here: a
-/// window that is topmost and has no taskbar button is not reliably activated on
-/// Windows, so the popup can be visible without ever being focused — and a
-/// window that never gains focus never loses it, which is why a blur-based close
-/// never fired. What the gesture actually is, is a mouse press that is not
-/// inside the window, so the press is what is watched.
-///
-/// "Inside" is decided from the press coordinates against the window rectangle,
-/// which is the part that matters: a hook that closed the popup on *every* press
-/// made the panel impossible to use, since its own buttons closed it before they
-/// could run. The check has to happen before the hook is removed, so an inside
-/// press leaves everything as it was and the popup keeps watching.
-///
-/// `WH_MOUSE_LL` runs on the thread that installs it and needs a message loop,
-/// so this is called on the main thread (from \ref show_update_popup) while the
-/// hook's callback is the thing that does the work. The hook unhooks itself the
-/// first time it dismisses something, so it is only ever watching between a show
-/// and the press that closes it.
-#[cfg(target_os = "windows")]
-fn watch_outside_click(popup: tauri::WebviewWindow) {
-    use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, SW_HIDE, WH_MOUSE_LL,
-        WM_LBUTTONDOWN, WM_RBUTTONDOWN,
-    };
-
-    /// A low-level mouse event. `pt` is in screen coordinates, which is also
-    /// what the window rectangle is measured in, so the two compare directly.
-    #[repr(C)]
-    struct MouseHookData {
-        pt: windows_sys::Win32::Foundation::POINT,
-        mouse_data: u32,
-        flags: u32,
-        time: u32,
-        extra_info: usize,
-    }
-
-    /// What the hook needs, captured once up front.
-    ///
-    /// The rectangle is read at install time on purpose. The hook procedure runs
-    /// on the main thread, and every window query dispatches *to* the main
-    /// thread and waits — asking the window for its position from inside the
-    /// callback would be the thread waiting on itself. The window does not move
-    /// while it is open, so a snapshot taken just before it goes up is enough.
-    struct Target {
-        hwnd: isize,
-        hook: isize,
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
-    }
-
-    static TARGET: std::sync::OnceLock<std::sync::Mutex<Option<Target>>> = std::sync::OnceLock::new();
-
-    unsafe extern "system" fn proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        // A negative code means "pass it along without touching it".
-        if code >= 0 && (wparam as u32 == WM_LBUTTONDOWN || wparam as u32 == WM_RBUTTONDOWN) {
-            if let Some(target) = TARGET.get() {
-                let mut guard = target.lock().unwrap();
-                let inside = match guard.as_ref() {
-                    Some(t) => {
-                        let data = &*(lparam as *const MouseHookData);
-                        let (x, y) = (data.pt.x, data.pt.y);
-                        x >= t.left && y >= t.top && x < t.right && y < t.bottom
-                    }
-                    None => return unsafe {
-                        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
-                    },
-                };
-                // A press inside the panel belongs to the panel: the click is
-                // left alone and the hook stays on, so a later press outside
-                // still closes it. This is the whole reason the check exists —
-                // dismissing on every press made every control unusable.
-                if !inside {
-                    if let Some(t) = guard.take() {
-                        unsafe { UnhookWindowsHookEx(t.hook as *mut core::ffi::c_void) };
-                        // The raw HWND, not `window.hide()`: this callback *is*
-                        // the main thread, and Tauri's window methods dispatch to
-                        // the main thread and wait — calling one from here is the
-                        // thread blocking on itself, which wedged the whole app.
-                        // ShowWindow does the same job without dispatching.
-                        unsafe {
-                            ShowWindow(t.hwnd as *mut core::ffi::c_void, SW_HIDE);
-                        }
-                    }
-                }
-            }
-        }
-        unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
-    }
-
-    // Snapshot the rectangle and the handle before the hook exists, so nothing
-    // in the callback ever needs to ask the main thread a question.
-    let (hwnd, left, top, right, bottom) = match (popup.hwnd(), popup.outer_position(), popup.outer_size())
-    {
-        (Ok(hwnd), Ok(origin), Ok(size)) => (
-            hwnd.0 as isize,
-            origin.x,
-            origin.y,
-            origin.x + size.width as i32,
-            origin.y + size.height as i32,
-        ),
-        _ => return,
-    };
-
-    let slot = TARGET.get_or_init(|| std::sync::Mutex::new(None));
-    if let Some(previous) = slot.lock().unwrap().take() {
-        if previous.hook != 0 {
-            unsafe { UnhookWindowsHookEx(previous.hook as *mut core::ffi::c_void) };
-        }
-    }
-
-    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(proc), std::ptr::null_mut(), 0) };
-    if hook.is_null() {
-        // Not fatal: without it the popup simply relies on the chip toggling it
-        // shut, or Escape.
-        eprintln!("dsh-desktop: update popup outside-click hook not installed");
-        return;
-    }
-    *slot.lock().unwrap() = Some(Target {
-        hwnd,
-        hook: hook as isize,
-        left,
-        top,
-        right,
-        bottom,
-    });
-}
-
-#[cfg(not(target_os = "windows"))]
-fn watch_outside_click(_popup: tauri::WebviewWindow) {}
 
 /// Build the update popup window, hidden, so the first click only has to show it.
 ///
@@ -709,10 +589,14 @@ fn prepare_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
 
     // 透明渲染在软件合成下不可靠，所以窗口不透明、圆角交给区域裁剪。
     let frame = app.get_window("update-popup");
+    // 置顶 + 不在任务栏的窗口本来就拿不到前台，所以干脆不要激活权：不激活就
+    // 不会被"失活"消息波及，弹窗不会自己消失，主窗口的焦点也不会被打断。
+    if let Ok(hwnd) = built.hwnd() {
+        make_non_activating(hwnd.0 as isize);
+    }
     if let Some(window) = &frame {
         apply_rounded_region_r(window, POPUP_RADIUS);
     }
-    let events = built.clone();
     built.on_window_event(move |event| match event {
         // The popup is sized to its content, so its height changes as sections
         // open and notes appear. The rounded region is in window coordinates and
@@ -723,21 +607,12 @@ fn prepare_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
                 apply_rounded_region_r(window, POPUP_RADIUS);
             }
         }
-        // Losing focus is what "clicked somewhere else" looks like once the
-        // window is on screen, and it is the whole dismissal mechanism — there
-        // is no scrim behind an always-on-top popup, so nothing else catches the
-        // click. The wait is because a blur also arrives mid-creation, before
-        // the window has ever been shown: rather than trusting the event, the
-        // decision is made a moment later, against the state at that point.
-        WindowEvent::Focused(false) => {
-            let window = events.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(200));
-                if window.is_visible().unwrap_or(false) && !window.is_focused().unwrap_or(false) {
-                    let _ = window.hide();
-                }
-            });
-        }
+        // Deliberately no blur handler. Closing on focus loss was the original
+        // approach and it never worked — the window is topmost and taskbar-less,
+        // so Windows does not activate it and it can be visible without ever
+        // being focused. What it *did* do was close the popup on the focus
+        // changes it does receive, which is what made it vanish right after
+        // opening. Dismissal is the outside-press watch in show_update_popup.
         _ => {}
     });
     Ok(())
