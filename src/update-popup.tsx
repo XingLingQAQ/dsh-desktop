@@ -100,6 +100,8 @@ function UpdatePopup() {
   const [checking, setChecking] = useState(false);
   const [busy, setBusy] = useState<"download" | "install" | "harness" | null>(null);
   const [log, setLog] = useState<string[]>([]);
+  // `chunk` here is the running total across the whole download, not the size of
+  // the latest chunk — the event carries the latter, and the listener adds it up.
   const [progress, setProgress] = useState<{ chunk: number; total: number | null } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // The version whose payload is already on disk and verified. Downloading and
@@ -144,9 +146,17 @@ function UpdatePopup() {
     const offLog = listen<string>("update-log", (event) => {
       setLog((lines) => [...lines.slice(-79), event.payload]);
     });
+    // 每一个事件带的是**这一块**的长度（updater 的 on_chunk 传的是
+    // chunk.len()，不是累计值），所以要自己累加。直接把它当成已下载量的话，
+    // 进度条会在每块之间来回跳，而不是一路往上走。
     const offProgress = listen<{ chunk: number; total: number | null }>(
       "update-progress",
-      (event) => setProgress(event.payload),
+      (event) =>
+        setProgress((current) => ({
+          chunk: (current?.chunk ?? 0) + event.payload.chunk,
+          // 总长可能来得晚（取决于是不是分块响应），有就用新的。
+          total: event.payload.total ?? current?.total ?? null,
+        })),
     );
     return () => {
       un.then((fn) => fn());
@@ -324,10 +334,14 @@ function UpdatePopup() {
   const clientTone =
     client?.error != null ? "error" : client?.available ? "new" : client == null ? "muted" : "ok";
 
-  const percent =
+  // The bar takes the exact fraction and the text takes the rounded percent:
+  // rounding the width as well would move it in visible steps, which is the
+  // thing being fixed here.
+  const fraction =
     progress === null || progress.total === null || progress.total === 0
       ? null
-      : Math.min(100, Math.round((progress.chunk / progress.total) * 100));
+      : Math.min(1, progress.chunk / progress.total);
+  const percent = fraction === null ? null : Math.min(100, Math.round(fraction * 100));
 
   return (
     <div className="upd-pop">
@@ -372,7 +386,12 @@ function UpdatePopup() {
             <div className="upd-bar">
               <div
                 className="upd-barFill"
-                style={percent === null ? { width: "100%" } : { width: `${percent}%` }}
+                data-indeterminate={fraction === null}
+                style={
+                  fraction === null
+                    ? undefined
+                    : { width: `${(fraction * 100).toFixed(2)}%` }
+                }
               />
             </div>
             <span className="upd-progressText">

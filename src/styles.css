@@ -1396,10 +1396,44 @@ html.upd-window body {
   overflow: hidden;
 }
 
+/* 宽度给到小数（见 update-popup.tsx）：按整数百分比推进的话，条子是一格一格
+   跳的。过渡时间比事件间隔略长一点，让每一小块都接得上，看起来是连续在走。 */
 .upd-barFill {
   height: 100%;
   background: var(--ds-brand);
-  transition: width 0.15s ease;
+  border-radius: inherit;
+  transition: width 0.2s linear;
+}
+
+/* 还不知道总长度时（分块响应会先不带 Content-Length）不放一段假的满条，走
+   一段来回的动画表示"在下、还不知道多少"。 */
+.upd-barFill[data-indeterminate='true'] {
+  width: 40%;
+  border-radius: inherit;
+  animation: upd-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes upd-slide {
+  0% {
+    margin-left: 0;
+  }
+  50% {
+    margin-left: 60%;
+  }
+  100% {
+    margin-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .upd-barFill {
+    transition: none;
+  }
+  .upd-barFill[data-indeterminate='true'] {
+    animation: none;
+    width: 100%;
+    opacity: 0.45;
+  }
 }
 
 .upd-progressText {
