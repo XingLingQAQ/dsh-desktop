@@ -505,12 +505,8 @@ fn show_update_popup(
     // SetWindowRgn invalidates the whole window and forces a repaint at exactly
     // the moment it is supposed to appear.
     let _ = popup.show();
-    // Dismissal is "a press landed outside this window", and that is detected by
-    // a mouse hook rather than by focus (see watch_outside_click): a topmost,
-    // taskbar-less window is not reliably activated on Windows, so a blur-based
-    // close can simply never fire. Focus is still requested so Escape reaches
-    // the page when the window manager does grant it.
-    watch_outside_click(popup.clone());
+    // Focus is requested so Escape reaches the page when the window manager does
+    // grant it; nothing depends on it succeeding.
     let _ = popup.set_focus();
     force_foreground(&popup);
     let _ = app.emit_to(
@@ -518,6 +514,13 @@ fn show_update_popup(
         "update-popup-shown",
         (),
     );
+    // The hook goes on last, once the window is actually on screen at its final
+    // position. Installing it before the window is up means the first event it
+    // sees is compared against a rectangle that is not where the panel ended up,
+    // which reads as "the press was outside" and closes the thing that was just
+    // opened. `is_visible` is the guard for that, but not believing a stale
+    // rectangle is the real fix — the window is brought up first, then watched.
+    watch_outside_click(popup);
     Ok(())
 }
 
@@ -551,34 +554,84 @@ fn force_foreground(_window: &tauri::WebviewWindow) {}
 /// never fired. What the gesture actually is, is a mouse press that is not
 /// inside the window, so the press is what is watched.
 ///
+/// "Inside" is decided from the press coordinates against the window rectangle,
+/// which is the part that matters: a hook that closed the popup on *every* press
+/// made the panel impossible to use, since its own buttons closed it before they
+/// could run. The check has to happen before the hook is removed, so an inside
+/// press leaves everything as it was and the popup keeps watching.
+///
 /// `WH_MOUSE_LL` runs on the thread that installs it and needs a message loop,
 /// so this is called on the main thread (from \ref show_update_popup) while the
 /// hook's callback is the thing that does the work. The hook unhooks itself the
-/// first time it is asked to hide something, so it is only ever watching between
-/// a show and the press that dismisses it.
+/// first time it dismisses something, so it is only ever watching between a show
+/// and the press that closes it.
 #[cfg(target_os = "windows")]
 fn watch_outside_click(popup: tauri::WebviewWindow) {
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN,
-        WM_RBUTTONDOWN,
+        CallNextHookEx, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, SW_HIDE, WH_MOUSE_LL,
+        WM_LBUTTONDOWN, WM_RBUTTONDOWN,
     };
 
-    /// The hook procedure is a plain function pointer and cannot capture, so the
-    /// window to hide lives here. There is one popup, so one slot is enough.
-    static TARGET: std::sync::OnceLock<std::sync::Mutex<Option<(tauri::WebviewWindow, isize)>>> =
-        std::sync::OnceLock::new();
+    /// A low-level mouse event. `pt` is in screen coordinates, which is also
+    /// what the window rectangle is measured in, so the two compare directly.
+    #[repr(C)]
+    struct MouseHookData {
+        pt: windows_sys::Win32::Foundation::POINT,
+        mouse_data: u32,
+        flags: u32,
+        time: u32,
+        extra_info: usize,
+    }
+
+    /// What the hook needs, captured once up front.
+    ///
+    /// The rectangle is read at install time on purpose. The hook procedure runs
+    /// on the main thread, and every window query dispatches *to* the main
+    /// thread and waits — asking the window for its position from inside the
+    /// callback would be the thread waiting on itself. The window does not move
+    /// while it is open, so a snapshot taken just before it goes up is enough.
+    struct Target {
+        hwnd: isize,
+        hook: isize,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    static TARGET: std::sync::OnceLock<std::sync::Mutex<Option<Target>>> = std::sync::OnceLock::new();
 
     unsafe extern "system" fn proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         // A negative code means "pass it along without touching it".
         if code >= 0 && (wparam as u32 == WM_LBUTTONDOWN || wparam as u32 == WM_RBUTTONDOWN) {
             if let Some(target) = TARGET.get() {
-                if let Some((window, hook)) = target.lock().unwrap().take() {
-                    unsafe { UnhookWindowsHookEx(hook as *mut core::ffi::c_void) };
-                    // Only dismiss if the window is actually up: the press may be
-                    // the one that opened it in the first place.
-                    if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
+                let mut guard = target.lock().unwrap();
+                let inside = match guard.as_ref() {
+                    Some(t) => {
+                        let data = &*(lparam as *const MouseHookData);
+                        let (x, y) = (data.pt.x, data.pt.y);
+                        x >= t.left && y >= t.top && x < t.right && y < t.bottom
+                    }
+                    None => return unsafe {
+                        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+                    },
+                };
+                // A press inside the panel belongs to the panel: the click is
+                // left alone and the hook stays on, so a later press outside
+                // still closes it. This is the whole reason the check exists —
+                // dismissing on every press made every control unusable.
+                if !inside {
+                    if let Some(t) = guard.take() {
+                        unsafe { UnhookWindowsHookEx(t.hook as *mut core::ffi::c_void) };
+                        // The raw HWND, not `window.hide()`: this callback *is*
+                        // the main thread, and Tauri's window methods dispatch to
+                        // the main thread and wait — calling one from here is the
+                        // thread blocking on itself, which wedged the whole app.
+                        // ShowWindow does the same job without dispatching.
+                        unsafe {
+                            ShowWindow(t.hwnd as *mut core::ffi::c_void, SW_HIDE);
+                        }
                     }
                 }
             }
@@ -586,10 +639,24 @@ fn watch_outside_click(popup: tauri::WebviewWindow) {
         unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
     }
 
+    // Snapshot the rectangle and the handle before the hook exists, so nothing
+    // in the callback ever needs to ask the main thread a question.
+    let (hwnd, left, top, right, bottom) = match (popup.hwnd(), popup.outer_position(), popup.outer_size())
+    {
+        (Ok(hwnd), Ok(origin), Ok(size)) => (
+            hwnd.0 as isize,
+            origin.x,
+            origin.y,
+            origin.x + size.width as i32,
+            origin.y + size.height as i32,
+        ),
+        _ => return,
+    };
+
     let slot = TARGET.get_or_init(|| std::sync::Mutex::new(None));
-    if let Some((_, previous)) = slot.lock().unwrap().replace((popup, 0)) {
-        if previous != 0 {
-            unsafe { UnhookWindowsHookEx(previous as *mut core::ffi::c_void) };
+    if let Some(previous) = slot.lock().unwrap().take() {
+        if previous.hook != 0 {
+            unsafe { UnhookWindowsHookEx(previous.hook as *mut core::ffi::c_void) };
         }
     }
 
@@ -598,12 +665,16 @@ fn watch_outside_click(popup: tauri::WebviewWindow) {
         // Not fatal: without it the popup simply relies on the chip toggling it
         // shut, or Escape.
         eprintln!("dsh-desktop: update popup outside-click hook not installed");
-        slot.lock().unwrap().take();
         return;
     }
-    if let Some(entry) = slot.lock().unwrap().as_mut() {
-        entry.1 = hook as isize;
-    }
+    *slot.lock().unwrap() = Some(Target {
+        hwnd,
+        hook: hook as isize,
+        left,
+        top,
+        right,
+        bottom,
+    });
 }
 
 #[cfg(not(target_os = "windows"))]
