@@ -120,6 +120,21 @@ function Shell() {
     };
   }, []);
 
+  /* 更新弹窗是另一个窗口，它靠"鼠标按在别处"关闭。这一条是壳这边的兜底：按在
+     标题栏/设置面板这些壳自己画的地方时，直接请它关掉。DSH 内容那层是独立的
+     子 webview，按在上面壳这里收不到，那条路由 Rust 侧的鼠标钩子兜（见
+     lib.rs 的 watch_outside_click）。 */
+  useEffect(() => {
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      // 版本号那一格是自己开关弹窗的，别在这里抢先关掉。
+      if (target?.closest(".brand-version") !== null) return;
+      void invoke("close_update_popup");
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, []);
+
   // 状态：事件推送 + 轮询兜底
   useEffect(() => {
     let disposed = false;

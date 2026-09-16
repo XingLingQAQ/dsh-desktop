@@ -272,6 +272,25 @@ async fn open_update_popup(
     .map_err(|e| e.to_string())
 }
 
+/// Hide the update popup if it is up.
+///
+/// A press anywhere in the shell dismisses it, the same as a press outside any
+/// other popover. The shell page calls this on its own mouse-downs; presses that
+/// land on the DSH content are handled in Rust, since that is a separate child
+/// webview the shell page never sees.
+#[tauri::command]
+async fn close_update_popup(app: tauri::AppHandle) -> Result<(), String> {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if let Some(popup) = handle.get_webview_window("update-popup") {
+            if popup.is_visible().unwrap_or(false) {
+                let _ = popup.hide();
+            }
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// 排空 host 进程事件通道里开机之后积压的 stdout/stderr 行。
 ///
 /// 开机就绪循环拿到 Ready 行后就退出,此后 host 的所有输出(含 cordis HMR
@@ -486,10 +505,14 @@ fn show_update_popup(
     // SetWindowRgn invalidates the whole window and forces a repaint at exactly
     // the moment it is supposed to appear.
     let _ = popup.show();
-    // Focus is taken so the window can be dismissed by clicking elsewhere: the
-    // blur handler below is what stands in for a popover's scrim. This runs on
-    // the main thread (see the command), which is where focus calls belong.
+    // Dismissal is "a press landed outside this window", and that is detected by
+    // a mouse hook rather than by focus (see watch_outside_click): a topmost,
+    // taskbar-less window is not reliably activated on Windows, so a blur-based
+    // close can simply never fire. Focus is still requested so Escape reaches
+    // the page when the window manager does grant it.
+    watch_outside_click(popup.clone());
     let _ = popup.set_focus();
+    force_foreground(&popup);
     let _ = app.emit_to(
         tauri::EventTarget::webview_window("update-popup"),
         "update-popup-shown",
@@ -497,6 +520,94 @@ fn show_update_popup(
     );
     Ok(())
 }
+
+/// Ask the window manager to make `window` the foreground window.
+///
+/// Best effort on purpose: `set_focus` is refused for a window that is topmost
+/// and absent from the taskbar, and this is the direct equivalent. Nothing
+/// depends on it succeeding — the dismissal path does not use focus.
+#[cfg(target_os = "windows")]
+fn force_foreground(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{BringWindowToTop, SetForegroundWindow};
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let hwnd = hwnd.0 as *mut core::ffi::c_void;
+    unsafe {
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn force_foreground(_window: &tauri::WebviewWindow) {}
+
+/// Hide the popup as soon as a press lands outside it.
+///
+/// Focus is the obvious signal for "clicked elsewhere" and does not work here: a
+/// window that is topmost and has no taskbar button is not reliably activated on
+/// Windows, so the popup can be visible without ever being focused — and a
+/// window that never gains focus never loses it, which is why a blur-based close
+/// never fired. What the gesture actually is, is a mouse press that is not
+/// inside the window, so the press is what is watched.
+///
+/// `WH_MOUSE_LL` runs on the thread that installs it and needs a message loop,
+/// so this is called on the main thread (from \ref show_update_popup) while the
+/// hook's callback is the thing that does the work. The hook unhooks itself the
+/// first time it is asked to hide something, so it is only ever watching between
+/// a show and the press that dismisses it.
+#[cfg(target_os = "windows")]
+fn watch_outside_click(popup: tauri::WebviewWindow) {
+    use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN,
+        WM_RBUTTONDOWN,
+    };
+
+    /// The hook procedure is a plain function pointer and cannot capture, so the
+    /// window to hide lives here. There is one popup, so one slot is enough.
+    static TARGET: std::sync::OnceLock<std::sync::Mutex<Option<(tauri::WebviewWindow, isize)>>> =
+        std::sync::OnceLock::new();
+
+    unsafe extern "system" fn proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // A negative code means "pass it along without touching it".
+        if code >= 0 && (wparam as u32 == WM_LBUTTONDOWN || wparam as u32 == WM_RBUTTONDOWN) {
+            if let Some(target) = TARGET.get() {
+                if let Some((window, hook)) = target.lock().unwrap().take() {
+                    unsafe { UnhookWindowsHookEx(hook as *mut core::ffi::c_void) };
+                    // Only dismiss if the window is actually up: the press may be
+                    // the one that opened it in the first place.
+                    if window.is_visible().unwrap_or(false) {
+                        let _ = window.hide();
+                    }
+                }
+            }
+        }
+        unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+    }
+
+    let slot = TARGET.get_or_init(|| std::sync::Mutex::new(None));
+    if let Some((_, previous)) = slot.lock().unwrap().replace((popup, 0)) {
+        if previous != 0 {
+            unsafe { UnhookWindowsHookEx(previous as *mut core::ffi::c_void) };
+        }
+    }
+
+    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(proc), std::ptr::null_mut(), 0) };
+    if hook.is_null() {
+        // Not fatal: without it the popup simply relies on the chip toggling it
+        // shut, or Escape.
+        eprintln!("dsh-desktop: update popup outside-click hook not installed");
+        slot.lock().unwrap().take();
+        return;
+    }
+    if let Some(entry) = slot.lock().unwrap().as_mut() {
+        entry.1 = hook as isize;
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn watch_outside_click(_popup: tauri::WebviewWindow) {}
 
 /// Build the update popup window, hidden, so the first click only has to show it.
 ///
@@ -541,13 +652,16 @@ fn prepare_update_popup(app: &tauri::AppHandle) -> Result<(), String> {
                 apply_rounded_region_r(window, POPUP_RADIUS);
             }
         }
+        // Losing focus is what "clicked somewhere else" looks like once the
+        // window is on screen, and it is the whole dismissal mechanism — there
+        // is no scrim behind an always-on-top popup, so nothing else catches the
+        // click. The wait is because a blur also arrives mid-creation, before
+        // the window has ever been shown: rather than trusting the event, the
+        // decision is made a moment later, against the state at that point.
         WindowEvent::Focused(false) => {
-            // A blur arrives while the window is still being created, before it
-            // has ever been shown, so the hide waits a moment and then checks
-            // rather than trusting the event alone.
             let window = events.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(250));
+                std::thread::sleep(Duration::from_millis(200));
                 if window.is_visible().unwrap_or(false) && !window.is_focused().unwrap_or(false) {
                     let _ = window.hide();
                 }
@@ -1090,6 +1204,7 @@ pub fn run() {
             get_theme,
             get_app_version,
             open_update_popup,
+            close_update_popup,
             resize_update_popup,
             check_updates,
             install_harness_update,
