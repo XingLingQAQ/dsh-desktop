@@ -755,15 +755,31 @@ fn attach_content_webview(app: &tauri::AppHandle, url: Url, bridge: &Bridge) -> 
 
     // 克隆句柄供闭包使用（&self 接收者借用与闭包 move 冲突）
     let window_handle = window.clone();
+    // 整个应用失去前台（点了 Edge、桌面、别的程序）时把更新弹窗关掉。
+    //
+    // 弹窗本身是刻意不抢激活的（见 make_non_activating），所以它永远收不到"失活"；
+    // 而点别的程序时，被通知的是**主窗口**——它是这个应用真正持有前台的那个窗口。
+    // 这条和"点 DSH 页面/壳页面"那两条各管一段，合起来才是"点弹窗外面任何地方"。
+    let app_for_deactivate = app.clone();
     window.on_window_event(move |event| {
-        if let WindowEvent::Resized(size) = event {
-            apply_rounded_region(&window_handle);
-            let w = size.width as f64;
-            let h = size.height as f64 - TITLEBAR_HEIGHT;
-            if w > 0.0 && h > 0.0 {
-                let _ = child.set_position(LogicalPosition::new(0.0, TITLEBAR_HEIGHT));
-                let _ = child.set_size(LogicalSize::new(w, h));
+        match event {
+            WindowEvent::Resized(size) => {
+                apply_rounded_region(&window_handle);
+                let w = size.width as f64;
+                let h = size.height as f64 - TITLEBAR_HEIGHT;
+                if w > 0.0 && h > 0.0 {
+                    let _ = child.set_position(LogicalPosition::new(0.0, TITLEBAR_HEIGHT));
+                    let _ = child.set_size(LogicalSize::new(w, h));
+                }
             }
+            WindowEvent::Focused(false) => {
+                if let Some(popup) = app_for_deactivate.get_webview_window("update-popup") {
+                    if popup.is_visible().unwrap_or(false) {
+                        let _ = popup.hide();
+                    }
+                }
+            }
+            _ => {}
         }
     });
     Ok(())

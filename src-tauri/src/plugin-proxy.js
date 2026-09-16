@@ -457,15 +457,40 @@
   function mergeBoot(value) {
     if (!isObject(value) || !Array.isArray(value.entries)) return value;
     var entries = value.entries.slice();
+    var added = [];
     known.forEach(function (entry) {
       if (!entries.some(function (e) { return isObject(e) && e.id === entry.id; })) {
         entries.push(entry);
+        added.push(entry);
       }
     });
-    return {
-      rev: value.rev,
-      entries: entries
-    };
+    // 保留宿主写进来的其他字段，只换 entries / 追加 batches。
+    // 之前这里是重新拼一个 {rev, entries}，把别的都丢了——新版 DSH 的
+    // client-modules 会校验 `batches` 必须是数组，字段一没就抛
+    // "boot manifest batches must be an array"，整个插件加载失败。
+    var merged = {};
+    for (var key in value) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) merged[key] = value[key];
+    }
+    // 而且每个 entry 都必须属于某个 batch，否则会换一个错继续炸
+    // （"belongs to no initial-load batch"）。宿主给它的 entry 分好了组合包，
+    // 我们的插件是另外服务的，所以每个自己配一个单条的 batch：
+    // url 就是该 entry 自己的 url，rev 也是。
+    if (Array.isArray(merged.batches)) {
+      var batches = merged.batches.slice();
+      added.forEach(function (entry) {
+        batches.push({
+          phase: "application",
+          url: entry.url,
+          rev: entry.rev,
+          entries: [entry.id]
+        });
+      });
+      merged.batches = batches;
+    }
+    merged.rev = value.rev;
+    merged.entries = entries;
+    return merged;
   }
 
   // ------------------------------------------------------------ __ModuleLoader__
