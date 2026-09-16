@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { applyTheme, fetchTheme, type ThemeSnapshot } from "./theme";
+import { DshSelect } from "./DshSelect";
 import "./styles.css";
 
 /** Mirrors `update::HarnessUpdate` — the DSH CLI the shell runs. */
@@ -106,6 +107,7 @@ function UpdatePopup() {
   // while the app is being used, but applying one replaces this process, so it
   // waits to be asked.
   const [downloaded, setDownloaded] = useState<string | null>(null);
+  const [harnessOpen, setHarnessOpen] = useState(false);
 
   const close = useCallback(() => {
     void getCurrentWindow().hide();
@@ -207,6 +209,17 @@ function UpdatePopup() {
       if (indicator) setChecking(false);
     }
   }, []);
+
+  // Open the DSH section when its check turns up something to install — a
+  // folded row is the right default, but a folded row hiding a pending update
+  // is just a place for it to be missed. Only a transition opens it: once it is
+  // open, or once someone has closed it themselves, later checks leave it be.
+  const harnessOffered = report?.harness.available === true;
+  const wasOffered = useRef(false);
+  useEffect(() => {
+    if (harnessOffered && !wasOffered.current) setHarnessOpen(true);
+    wasOffered.current = harnessOffered;
+  }, [harnessOffered]);
 
   // The shell says when this window has been put on screen. Between opens it
   // stays alive, so there is no mount to hang a check on and the report from
@@ -380,14 +393,16 @@ function UpdatePopup() {
               先查一次，查到才有得下。所以查到之前按钮不换、不禁用——凭当前
               这份报告把按钮藏起来，碰到没查到（清单暂时取不到）就等于把人堵
               在门口，连再试一次都点不动。主按钮一直在，点了自己会说话。 */}
+          {/* 主按钮不出现"检查并更新"这种把两件事并排写的说法：它永远只描述
+              这一下会发生什么。没查到过、或者上次没查到 → 是「检查更新」；
+              已经知道有新版本 → 是「下载更新」；包到了手上 → 是「安装并重启」。
+              所以按钮一直在（见下面的注释），但字永远只有一个动词。 */}
           <button
             className="upd-button primary"
             disabled={checking || busy !== null}
             onClick={() => void checkAndDownload()}
           >
             {(checking || busy !== null) && <span className="upd-spinner" aria-hidden="true" />}
-            {/* 没有进度就还没开始下（正在查），有进度就是真在下了——比拿
-                busy 猜更准。 */}
             {busy === "install"
               ? "正在安装…"
               : checking || busy === "download"
@@ -396,14 +411,18 @@ function UpdatePopup() {
                   : `下载中… ${percent}%`
                 : hasPayload
                   ? "安装并重启"
-                  : "检查并更新"}
+                  : client?.available
+                    ? "下载更新"
+                    : "检查更新"}
           </button>
         </div>
 
         {notice !== null && <p className="upd-notice">{notice}</p>}
 
-        {/* 内核默认折起来：这个弹窗先回答「客户端要不要更新」。 */}
-        <details className="upd-more">
+        {/* 内核默认折起来：这个弹窗先回答「客户端要不要更新」。但真查到了内核
+            的新版本就自己展开——藏着一个等你去装的更新，等于没查。展开是单向
+            的：查完之后用户自己合上，不该被下一次检查又弹开。 */}
+        <details className="upd-more" open={harnessOpen} onToggle={(event) => setHarnessOpen(event.currentTarget.open)}>
           <summary>DSH 内核</summary>
           <div className="upd-moreBody">
             <div className="upd-row">
@@ -414,17 +433,12 @@ function UpdatePopup() {
             </div>
             <label className="upd-field">
               <span>更新通道</span>
-              <select
+              <DshSelect
                 value={channel}
+                choices={CHANNELS}
                 disabled={busy !== null}
-                onChange={(event) => void setChannelAndSave(event.target.value)}
-              >
-                {CHANNELS.map((entry) => (
-                  <option key={entry.value} value={entry.value}>
-                    {entry.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(next) => void setChannelAndSave(next)}
+              />
             </label>
             {harness?.available && harnessLatest !== null && (
               <button

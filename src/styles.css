@@ -1256,8 +1256,18 @@ html.upd-window body {
   color: var(--ds-label-2);
 }
 
-.upd-field select {
+/* 下拉：原生 <select> 弹出的那块面板由系统画，圆角/行高/底色一律不认页面的
+   样式，所以这里自己做——触发框照 DSH 的 Input（32 高、r8、l2 描边），
+   展开的卡片照 DSH 的 Menu（r12、菜单底色、shadow-lv3、4px 内缩、40 高行）。 */
+.upd-select {
+  position: relative;
+}
+
+.upd-selectTrigger {
   box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   width: 100%;
   height: 32px;
   padding: 0 8px;
@@ -1268,11 +1278,105 @@ html.upd-window body {
   font-family: inherit;
   font-size: 14px;
   line-height: 22px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s ease;
 }
 
-.upd-field select:focus {
-  outline: none;
+.upd-selectTrigger:hover:not(:disabled) {
+  border-color: var(--ds-label-3);
+}
+
+.upd-selectTrigger[aria-expanded='true'] {
   border-color: var(--ds-brand);
+}
+
+.upd-selectTrigger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.upd-selectLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upd-caret {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ds-label-3);
+  stroke-width: 1.4;
+  transition: transform 0.12s ease;
+}
+
+.upd-selectTrigger[aria-expanded='true'] .upd-caret {
+  transform: rotate(180deg);
+}
+
+/* 列表尺寸照 DSH Menu 的紧凑档（r7、2px 内缩、26 高行、12 号字）：这个列表只
+   有两行，用常规档（r12/4px/34 高）会显得比触发框本身还重，而且往上展开时正好
+   压住那个框。 */
+.upd-selectList {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--ds-bg-1);
+  /* lv3 阴影就是这一层的层次感来源；窗口不是透明的，所以它落在卡片自己的
+     边界之内，不会被裁掉。 */
+  box-shadow:
+    0 0 1px 0 rgba(0, 0, 0, 0.2),
+    0 0 4px 0 rgba(0, 0, 0, 0.02),
+    0 12px 32px 0 rgba(0, 0, 0, 0.08);
+}
+
+.upd-selectItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ds-label);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.upd-selectItem:hover {
+  background: var(--ds-hover);
+}
+
+.upd-selectItemLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 选中的标记是右边这个勾，行本身不改底色（和 DSH 的菜单一致）。 */
+.upd-selectCheck {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  stroke-width: 1.6;
+  color: var(--ds-label);
 }
 
 /* ── 进度与提示 ────────────────────────────────────────────────────────── */
