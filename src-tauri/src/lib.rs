@@ -1223,11 +1223,23 @@ pub fn run() {
             // 再以 Tauri 事件转发给壳页面与启动动画；插件状态/插件 bundle 也由
             // 同一个回环 HTTP 服务提供。
             let handle = app.handle().clone();
+            // 按在 DSH 内容区时把更新弹窗关掉。那个页面是独立的子 webview，
+            // 壳页面收不到它的点击；弹窗自己又是刻意不抢激活的（见
+            // make_non_activating），所以也不会因为焦点变化而收到通知。这条
+            // 回环上报是唯一能看到"用户点了 DSH 界面"的地方。
+            let press_handle = app.handle().clone();
             let bridge = bridge::start(
                 move |snapshot| {
                     let _ = handle.emit("theme-changed", snapshot);
                 },
                 plugins.clone(),
+                move || {
+                    if let Some(popup) = press_handle.get_webview_window("update-popup") {
+                        if popup.is_visible().unwrap_or(false) {
+                            let _ = popup.hide();
+                        }
+                    }
+                },
             )
             .map_err(|e| format!("bridge 启动失败: {e}"))?;
             plugins.set_bridge_base(bridge.base_url.clone());

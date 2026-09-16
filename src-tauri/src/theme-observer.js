@@ -3,6 +3,16 @@
 // and reports snapshots to the desktop shell's local bridge.
 (function () {
   var bridge = "__BRIDGE__";
+  var press = "__PRESS__";
+  // 用户按在 DSH 页面上时报一声，好让不该盖在上面的浮层（更新弹窗）收起来。
+  // 捕获阶段 + 不 await：这一点必须比页面自己的处理更早、也不能拖慢它。
+  function reportPress() {
+    try {
+      fetch(press, { method: "POST", body: "", keepalive: true }).catch(function () {});
+    } catch (e) {}
+  }
+  document.addEventListener("mousedown", reportPress, true);
+  document.addEventListener("touchstart", reportPress, true);
   var VARS = [
     "--dsw-alias-bg-base",
     "--dsw-alias-bg-layer-1",

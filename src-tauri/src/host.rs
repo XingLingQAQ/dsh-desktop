@@ -186,6 +186,12 @@ impl Drop for HostProcess {
 }
 
 /// Minimal HTTP GET health check against the loopback URL.
+///
+/// The readiness line carries the URL *with* its `?token=…`, and the token has
+/// to be sent: the host authenticates every request, and a bare `GET /` comes
+/// back 401 — which is a perfectly healthy host answering correctly, not a
+/// failed one. Only a missing answer at all (connection refused, timeout, empty
+/// read) means the host is not up.
 pub fn http_get_ok(url: &str) -> bool {
     let Some(parsed) = url.strip_prefix("http://") else {
         return false;
@@ -193,9 +199,13 @@ pub fn http_get_ok(url: &str) -> bool {
     let Some((host, rest)) = parsed.split_once(':') else {
         return false;
     };
-    let port: u16 = match rest.split('/').next().and_then(|p| p.parse().ok()) {
-        Some(p) => p,
-        None => return false,
+    let (port_part, path) = match rest.split_once('/') {
+        Some((port, rest_path)) => (port, format!("/{rest_path}")),
+        None => (rest, "/".to_string()),
+    };
+    let port: u16 = match port_part.parse() {
+        Ok(p) => p,
+        Err(_) => return false,
     };
     let addr: std::net::SocketAddr = match format!("{host}:{port}").parse() {
         Ok(addr) => addr,
@@ -205,7 +215,9 @@ pub fn http_get_ok(url: &str) -> bool {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-    let request = format!("GET / HTTP/1.0\r\nHost: {host}:{port}\r\n\r\n");
+    // Ask for the path we were given, token and all, and don't follow anything:
+    // any HTTP response at all proves the server is serving.
+    let request = format!("GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
@@ -213,7 +225,7 @@ pub fn http_get_ok(url: &str) -> bool {
     match stream.read(&mut buf) {
         Ok(n) if n > 0 => {
             let head = String::from_utf8_lossy(&buf[..n]);
-            head.starts_with("HTTP/1.0 200") || head.starts_with("HTTP/1.1 200")
+            head.starts_with("HTTP/")
         }
         _ => false,
     }

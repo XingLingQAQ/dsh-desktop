@@ -13,14 +13,32 @@ const NODE_MIRROR: &str = "https://npmmirror.com/mirrors/node";
 const NPM_REGISTRY: &str = "https://registry.npmmirror.com";
 const PNPM_VERSION: &str = "11.7.0";
 
+/// Run a command, streaming its output into the log, in a clean npm environment.
+///
+/// `npm_config_*` variables are stripped, and that is not tidiness — it is the
+/// difference between the harness update working and failing with a bare "退出
+/// 码 1". npm exports its whole configuration to the environment of any script
+/// it runs, so an app started with `npm run tauri dev` inherits things like
+/// `npm_config_allow_scripts=ws` from the developer's own `.npmrc`. A later
+/// `npm install` in that process reads those as command-line-equivalent config
+/// and refuses outright — `--allow-scripts is not allowed in project-scoped
+/// installs` — no matter what `--userconfig` says, because the environment wins.
+/// A shipped build started from a shortcut inherits none of this, which is why
+/// it only ever broke for us.
 fn run_logged(
     log: &dyn Fn(String),
     program: &str,
     args: &[&str],
 ) -> Result<std::process::Output, String> {
     log(format!("$ {program} {}", args.join(" ")));
-    let output = Command::new(program)
-        .args(args)
+    let mut command = Command::new(program);
+    command.args(args);
+    for (key, _) in std::env::vars() {
+        if key.to_ascii_lowercase().starts_with("npm_config_") {
+            command.env_remove(&key);
+        }
+    }
+    let output = command
         .output()
         .map_err(|e| format!("执行失败: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -210,6 +228,19 @@ pub fn install_dsh_version(
     let prefix = runtime_root().join("dsh");
     let package = format!("@deepseek-ai/dsh@{version}");
 
+    // 用自己的 npmrc，别继承用户那份。机器上的 ~/.npmrc 里有一行
+    // `allow-scripts=ws`，npm 在项目级安装里遇到这个键会直接报
+    // EALLOWSCRIPTS 并以退出码 1 收场——安装其实什么都没做，却看起来像网络
+    // 或包本身的问题。把配置指向我们自己的一个空文件，这套安装就只受我们写的
+    // 参数影响，用户环境里有什么都不会改变结果。
+    let npmrc = runtime_root().join("npmrc");
+    if let Some(parent) = npmrc.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if !npmrc.exists() {
+        let _ = std::fs::write(&npmrc, "");
+    }
+
     log(format!("安装 DeepSeek Harness {version}…"));
     run_logged(
         log,
@@ -222,6 +253,11 @@ pub fn install_dsh_version(
             &package,
             "--registry",
             NPM_REGISTRY,
+            "--userconfig",
+            npmrc.to_str().unwrap_or(""),
+            // 这个包带 postinstall 脚本（编译 spawn helper、prebuild 原生模块）。
+            // 不跑它们装出来的是一份坏掉的运行时。
+            "--foreground-scripts",
         ],
     )?;
 

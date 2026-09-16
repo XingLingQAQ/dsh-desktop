@@ -42,16 +42,24 @@ pub struct Bridge {
     /// and would render on the compiled-in light defaults whatever the app is
     /// actually wearing. Those windows read this instead.
     pub theme: Arc<Mutex<Option<ThemeSnapshot>>>,
+    /// Called when the DSH page reports a mouse press on itself.
+    ///
+    /// The page is a separate native webview, so the shell page never sees these
+    /// clicks — and the update popup, being deliberately non-activating, is not
+    /// closed by the focus changes they would otherwise cause. This is how a
+    /// press on the DSH UI dismisses the popup.
+    pub on_press: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Bridge {
     /// The initialization script for the DSH content webview: watches the DSH
     /// theme and reports snapshots to this bridge.
     pub fn theme_observer_script(&self) -> String {
-        include_str!("theme-observer.js").replace(
-            "__BRIDGE__",
-            &format!("{}/report/{}", self.base_url, self.token),
-        )
+        include_str!("theme-observer.js")
+            .replace("__BRIDGE__", &format!("{}/report/{}", self.base_url, self.token))
+            // The press endpoint is the same report path with a suffix, so it
+            // needs no second token to hand out.
+            .replace("__PRESS__", &format!("{}/report/{}/press", self.base_url, self.token))
     }
 
     /// The desktop plugin proxy: intercepts `__DSH_BOOT__` / `__ModuleLoader__`
@@ -80,12 +88,14 @@ fn random_token() -> String {
 /// Start the bridge on an ephemeral loopback port. Reports are forwarded to
 /// `on_report` (called from the bridge's accept thread); plugin state and
 /// plugin bundles are served from the plugin manager.
-pub fn start<F>(
+pub fn start<F, P>(
     on_report: F,
     plugins: Arc<PluginManager>,
+    on_press: P,
 ) -> std::io::Result<Bridge>
 where
     F: Fn(ThemeSnapshot) + Send + Sync + 'static,
+    P: Fn() + Send + Sync + 'static,
 {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
@@ -106,6 +116,11 @@ where
         *theme_slot.lock().unwrap() = Some(snapshot.clone());
         forward(snapshot);
     });
+    let press: Arc<dyn Fn() + Send + Sync> = Arc::new(on_press);
+    // The listening thread needs a clone of the Arc; the Bridge keeps the
+    // original, so both the live callback and `Bridge::on_press` refer to the
+    // same closure.
+    let press_for_thread = press.clone();
     let thread_plugins = plugins.clone();
 
     std::thread::spawn(move || {
@@ -117,6 +132,7 @@ where
                     let base = api_base.clone();
                     let cb = callback.clone();
                     let plugins = thread_plugins.clone();
+                    let press = press_for_thread.clone();
                     std::thread::spawn(move || {
                         handle_connection(
                             stream,
@@ -124,6 +140,7 @@ where
                             &api,
                             &base,
                             cb.as_ref(),
+                            press.as_ref(),
                             &plugins,
                         )
                     });
@@ -138,6 +155,7 @@ where
         token,
         plugins,
         theme,
+        on_press: press,
     })
 }
 
@@ -147,6 +165,7 @@ fn handle_connection(
     api_path: &str,
     api_base: &str,
     callback: &(dyn Fn(ThemeSnapshot) + Send + Sync),
+    on_press: &(dyn Fn() + Send + Sync),
     plugins: &PluginManager,
 ) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
@@ -226,6 +245,14 @@ fn handle_connection(
                 callback(ThemeSnapshot { dark, vars });
             }
         }
+        let _ = stream.write_all(
+            b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        );
+    } else if method == "POST" && path == format!("{expected_path}/press") {
+        // A press landed on the DSH page. It exists only to dismiss the update
+        // popup, which this page cannot reach through the Tauri event system
+        // (different origin, different webview).
+        on_press();
         let _ = stream.write_all(
             b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
         );
