@@ -506,12 +506,63 @@ fn show_update_popup(
     // the moment it is supposed to appear.
     let _ = popup.show();
     force_foreground(&popup);
+    // 点别的程序（Edge、桌面）也关掉。这件事只有"前台窗口换人了"能说明，
+    // 于是就在弹窗开着的时候盯着前台窗口；窗口一藏就停，平时不占资源。
+    watch_foreground(app);
     let _ = app.emit_to(
         tauri::EventTarget::webview_window("update-popup"),
         "update-popup-shown",
         (),
     );
     Ok(())
+}
+
+/// 弹窗开着期间的兜底：万一主窗口的失焦消息没来（比如焦点本来就不在主窗口、
+/// 或者消息被别的窗口吞了），也能把弹窗收掉。
+///
+/// 主角是主窗口的失焦处理（见 attach_content_webview），它是零延迟的。这条只是
+/// 保险，所以间隔放到 1 秒——慢一点没关系，它本来就不该被用到；平时也几乎不占
+/// 资源（每秒问一次系统"前台是谁"）。
+///
+/// 只在前台**换成别的窗口**时才动手。这台机器的 RDP 会话里，前台本来就常常属于
+/// 另一个进程（远程桌面宿主），拿"前台不是本进程"当条件会让弹窗一显示就被自己
+/// 关掉——所以先记下打开那刻的前台窗口，之后只有它变成另一个才关。
+fn watch_foreground(app: &tauri::AppHandle) {
+    // 同一时间只留一个看门线程：反复开关弹窗不该把线程攒起来。
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let opened_with = current_foreground();
+        loop {
+            std::thread::sleep(Duration::from_millis(1000));
+            let Some(popup) = handle.get_webview_window("update-popup") else {
+                break;
+            };
+            if !popup.is_visible().unwrap_or(false) {
+                break;
+            }
+            if current_foreground() != opened_with && foreground_is_other() {
+                let _ = popup.hide();
+                break;
+            }
+        }
+        RUNNING.store(false, Ordering::SeqCst);
+    });
+}
+
+/// 当前前台窗口的句柄（没有则 0）。用来判断"是不是换了窗口"。
+#[cfg(target_os = "windows")]
+fn current_foreground() -> isize {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    unsafe { GetForegroundWindow() as isize }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn current_foreground() -> isize {
+    0
 }
 
 /// 让窗口不抢激活、但能接收鼠标（WS_EX_NOACTIVATE，系统菜单就是这么做的）。
@@ -559,6 +610,33 @@ fn force_foreground(window: &tauri::WebviewWindow) {
 
 #[cfg(not(target_os = "windows"))]
 fn force_foreground(_window: &tauri::WebviewWindow) {}
+
+/// 前台窗口现在是不是别的程序（不是我们这个进程里的任何窗口）。
+///
+/// 这是判断"用户去点了别处"唯一可靠的依据。事件式的做法（监听自己的窗口失焦）
+/// 试过两轮都不行：
+///   * 弹窗是 WS_EX_NOACTIVATE，永远拿不到焦点，也就永远收不到失焦；
+///   * 主窗口的失焦消息既可能来自"切到别的程序"，也可能来自应用内部换窗口，
+///     分辨不出来——照单全收的结果就是弹窗刚出现就被自己关掉。
+/// 直接问系统"现在前台是谁"，答案是二值的，没有歧义。
+#[cfg(target_os = "windows")]
+fn foreground_is_other() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        // 没有前台窗口（非交互会话）——不能据此说人家点了别处。
+        return false;
+    }
+    let mut owner: u32 = 0;
+    unsafe { GetWindowThreadProcessId(foreground, &mut owner) };
+    owner != 0 && owner != std::process::id()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn foreground_is_other() -> bool {
+    false
+}
 
 /// Build the update popup window, hidden, so the first click only has to show it.
 ///
@@ -755,12 +833,7 @@ fn attach_content_webview(app: &tauri::AppHandle, url: Url, bridge: &Bridge) -> 
 
     // 克隆句柄供闭包使用（&self 接收者借用与闭包 move 冲突）
     let window_handle = window.clone();
-    // 整个应用失去前台（点了 Edge、桌面、别的程序）时把更新弹窗关掉。
-    //
-    // 弹窗本身是刻意不抢激活的（见 make_non_activating），所以它永远收不到"失活"；
-    // 而点别的程序时，被通知的是**主窗口**——它是这个应用真正持有前台的那个窗口。
-    // 这条和"点 DSH 页面/壳页面"那两条各管一段，合起来才是"点弹窗外面任何地方"。
-    let app_for_deactivate = app.clone();
+    let app_for_focus = app.clone();
     window.on_window_event(move |event| {
         match event {
             WindowEvent::Resized(size) => {
@@ -772,9 +845,21 @@ fn attach_content_webview(app: &tauri::AppHandle, url: Url, bridge: &Bridge) -> 
                     let _ = child.set_size(LogicalSize::new(w, h));
                 }
             }
+            // 主窗口失去焦点。这是"用户切到别的程序"能拿到的最早信号：系统在切换
+            // 的同一刻就送出来，比轮询快一个数量级（实测切换与消息之间只有毫秒）。
+            //
+            // 光有消息不够——启动阶段、应用内部换窗口也会让它响。所以收到消息后
+            // 立刻同步问一句"现在前台是谁"，答案不是我们这个进程才关。两个条件都
+            // 满足才动手，整个判断在同一瞬间完成，不需要等任何周期。
+            // 主窗口失去焦点 = 用户切到别的程序。系统在切换的同一刻就把这条消息
+            // 送出来，所以它比轮询快一个数量级，是这里的主路径。
+            //
+            // 只收到消息还不够：启动阶段、应用内部换窗口也会让它响。所以收到后
+            // 立刻同步问一句"现在前台是谁"，答案不是我们这个进程才关。两步都在
+            // 同一瞬间完成，不等待任何周期。
             WindowEvent::Focused(false) => {
-                if let Some(popup) = app_for_deactivate.get_webview_window("update-popup") {
-                    if popup.is_visible().unwrap_or(false) {
+                if let Some(popup) = app_for_focus.get_webview_window("update-popup") {
+                    if popup.is_visible().unwrap_or(false) && foreground_is_other() {
                         let _ = popup.hide();
                     }
                 }
