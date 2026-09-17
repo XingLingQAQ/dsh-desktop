@@ -281,14 +281,7 @@ async fn open_update_popup(
 #[tauri::command]
 async fn close_update_popup(app: tauri::AppHandle) -> Result<(), String> {
     let handle = app.clone();
-    app.run_on_main_thread(move || {
-        if let Some(popup) = handle.get_webview_window("update-popup") {
-            if popup.is_visible().unwrap_or(false) {
-                let _ = popup.hide();
-            }
-        }
-    })
-    .map_err(|e| e.to_string())
+    app.run_on_main_thread(move || hide_update_popup(&handle)).map_err(|e| e.to_string())
 }
 
 /// 排空 host 进程事件通道里开机之后积压的 stdout/stderr 行。
@@ -432,7 +425,28 @@ fn enter_main(app: &tauri::AppHandle) {
     }
 }
 
-/// Show the update popup under the version chip.
+/// 更新弹窗当前是否打开。
+///
+/// 唯一的状态来源：不管从哪条路关掉（点遮罩、点壳页面、点 DSH 页面、按 Esc），
+/// 都走 \ref hide_update_popup 把它清掉。这样"点版本号"的开关判断就永远和实际
+/// 一致，不会再出现"关掉之后再也打不开"。
+static POPUP_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// 关掉更新弹窗：窗口和遮罩一起收，并清掉状态标志。
+///
+/// 所有关闭路径都必须经过这里——直接 `popup.hide()` 会让标志留在打开状态，
+/// 下一次点版本号就会被当成"要关闭"。
+fn hide_update_popup(app: &tauri::AppHandle) {
+    POPUP_OPEN.store(false, Ordering::SeqCst);
+    // 停止接收鼠标消息：留着的话弹窗关了之后每条鼠标事件还会往一个隐藏窗口投，
+    // 白白唤醒事件循环（上一版钩子"变僵尸"就是这么来的）。
+    stop_watching_presses();
+    if let Some(popup) = app.get_webview_window("update-popup") {
+        let _ = popup.hide();
+    }
+}
+
+/// Hide the update popup under the version chip.
 ///
 /// It is a window of its own rather than a layer in the shell page because the
 /// DSH UI is a second, native webview placed over the shell's from the title bar
@@ -463,11 +477,14 @@ fn show_update_popup(
     let Some(popup) = app.get_webview_window("update-popup") else {
         return Err("更新窗口未创建".into());
     };
-    // The chip toggles: a second click closes it. The window also hides itself
-    // when it loses focus, but a toggle that does not depend on focus events is
-    // what makes the chip's behaviour predictable.
-    if popup.is_visible().unwrap_or(false) {
-        let _ = popup.hide();
+    // 开关状态记在我们自己这里，不靠 is_visible() 反推。
+    //
+    // 弹窗的隐藏有好几条路（点遮罩、点壳页面、点 DSH 页面、按 Esc），其中遮罩那条
+    // 走的是原生窗口流程。用 is_visible() 反推曾经导致"关掉之后再点打不开"：窗口
+    // 已经是隐藏状态，但判断读到的不是这个结论，于是走进了"隐藏"分支——越点越关。
+    // 自己维护一个标志，谁关的都把它清掉，就不会出现两边认知不一致。
+    if POPUP_OPEN.swap(false, Ordering::SeqCst) {
+        hide_update_popup(app);
         return Ok(());
     }
 
@@ -505,10 +522,20 @@ fn show_update_popup(
     // SetWindowRgn invalidates the whole window and forces a repaint at exactly
     // the moment it is supposed to appear.
     let _ = popup.show();
+    // 在弹窗下面铺一层全屏透明遮罩，专门接住"点在外面"这一下。
+    //
+    // 这是这个功能唯一站得住的做法：本机（RDP 非交互会话）里应用**从未获得过前台**
+    // ——前台恒定是远程桌面客户端，所以失焦消息永远不来、轮询前台永远判成"别人"。
+    // 全局鼠标钩子也试过，问题更多：回调跑在主线程上，里面做任何同步窗口操作都会
+    // 重入/自锁，取坐标还要跟 Tauri 的异步布局抢时间（实测取到的矩形偏了 40px，
+    // 把点弹窗自己判成了点外面）。
+    //
+    // Raw Input 是 Windows 为"后台、无焦点也能收输入"提供的正规机制，只往我们
+    // 投一条普通消息，不拦截系统消息链、不会被超时强杀、也不消费事件——点外面那
+    // 一下照常传给底下的程序。
+    watch_presses(popup.clone());
+    POPUP_OPEN.store(true, Ordering::SeqCst);
     force_foreground(&popup);
-    // 点别的程序（Edge、桌面）也关掉。这件事只有"前台窗口换人了"能说明，
-    // 于是就在弹窗开着的时候盯着前台窗口；窗口一藏就停，平时不占资源。
-    watch_foreground(app);
     let _ = app.emit_to(
         tauri::EventTarget::webview_window("update-popup"),
         "update-popup-shown",
@@ -517,61 +544,219 @@ fn show_update_popup(
     Ok(())
 }
 
-/// 弹窗开着期间的兜底：万一主窗口的失焦消息没来（比如焦点本来就不在主窗口、
-/// 或者消息被别的窗口吞了），也能把弹窗收掉。
+/// 弹窗打开期间，用 Raw Input 监听全局鼠标按下：按在弹窗外面就把它收起来。
 ///
-/// 主角是主窗口的失焦处理（见 attach_content_webview），它是零延迟的。这条只是
-/// 保险，所以间隔放到 1 秒——慢一点没关系，它本来就不该被用到；平时也几乎不占
-/// 资源（每秒问一次系统"前台是谁"）。
+/// **为什么是这个方案**。前面几版依次试过、都栽了：
+///   * 焦点类（弹窗失焦、主窗口失焦）——这台 RDP 会话里应用从未获得前台，
+///     消息根本不来；
+///   * 轮询前台窗口——前台恒为远程桌面客户端，判不出"用户走了"；
+///   * 全局鼠标钩子（WH_MOUSE_LL）——回调跑在主线程上，里面做任何同步窗口操作都会
+///     重入/自锁；取坐标还要和 Tauri 的异步布局抢时间，实测取到偏 40px 的矩形；
+///     关闭后钩子没摘干净还会变成僵尸继续吞点击。
 ///
-/// 只在前台**换成别的窗口**时才动手。这台机器的 RDP 会话里，前台本来就常常属于
-/// 另一个进程（远程桌面宿主），拿"前台不是本进程"当条件会让弹窗一显示就被自己
-/// 关掉——所以先记下打开那刻的前台窗口，之后只有它变成另一个才关。
-fn watch_foreground(app: &tauri::AppHandle) {
-    // 同一时间只留一个看门线程：反复开关弹窗不该把线程攒起来。
-    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if RUNNING.swap(true, Ordering::SeqCst) {
+/// `RIDEV_INPUTSINK` 是 Windows 为"后台、无焦点也能收输入"设计的正规机制：
+/// 系统在驱动层拿到鼠标动作后，往我们指定的窗口投一条普通的 `WM_INPUT` 消息。
+/// 走的是正常消息队列，所以**不拦截系统消息链、不会被 LowLevelHooksTimeout 强杀、
+/// 也不存在重入**；而且它不消费事件——点外面那一下照常传给底下的程序。
+///
+/// 判定坐标一律用**物理像素**：`GetCursorPos` 拿到的和 `DwmGetWindowAttribute`
+/// 拿到的同属一套屏幕坐标，直接可比；不去碰 Tauri 的逻辑像素（DPI 缩放时会
+/// 差一个系数，那正是之前"矩形偏移"的来源）。
+#[cfg(target_os = "windows")]
+fn watch_presses(popup: tauri::WebviewWindow) {
+    use windows_sys::Win32::UI::Input::{
+        RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK, RIDEV_REMOVE,
+    };
+
+    let Ok(hwnd) = popup.hwnd() else {
         return;
+    };
+    // 子类过程里要关弹窗，得能拿到 app。
+    let _ = SUBCLASS_APP.set(
+        popup
+            .app_handle()
+            .clone(),
+    );
+    OPENED_AT.store(
+        unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() },
+        Ordering::SeqCst,
+    );
+
+    // 挂子类过程接 WM_INPUT。用 SetWindowSubclass 而不是替换 WNDPROC：它可以叠加，
+    // 不会把 Tauri 自己的窗口过程丢掉（丢掉会让整个窗口失灵）。
+    unsafe {
+        windows_sys::Win32::UI::Shell::SetWindowSubclass(
+            hwnd.0 as *mut core::ffi::c_void,
+            Some(press_subclass),
+            0x4453_4831, // 子类 id，随便取一个不冲突的
+            0,
+        );
     }
-    let handle = app.clone();
-    std::thread::spawn(move || {
-        let opened_with = current_foreground();
-        loop {
-            std::thread::sleep(Duration::from_millis(1000));
-            let Some(popup) = handle.get_webview_window("update-popup") else {
-                break;
-            };
-            if !popup.is_visible().unwrap_or(false) {
-                break;
-            }
-            if current_foreground() != opened_with && foreground_is_other() {
-                let _ = popup.hide();
-                break;
-            }
-        }
-        RUNNING.store(false, Ordering::SeqCst);
-    });
+
+    let device = RAWINPUTDEVICE {
+        usUsagePage: 0x01, // Generic Desktop Controls
+        usUsage: 0x02,     // Mouse
+        dwFlags: RIDEV_INPUTSINK,
+        // 目标窗口：消息投给它，而它不需要在前台。
+        hwndTarget: hwnd.0 as *mut core::ffi::c_void,
+    };
+    let ok = unsafe {
+        RegisterRawInputDevices(&device, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32)
+    };
+    if ok == 0 {
+        eprintln!("dsh-desktop: raw input registration failed");
+    }
 }
 
-/// 当前前台窗口的句柄（没有则 0）。用来判断"是不是换了窗口"。
+/// 子类过程：只关心 `WM_INPUT`（Raw Input 的鼠标按键），其余原样交回。
+///
+/// 这里可以安全地做判断和隐藏——它跑在普通的窗口消息队列里，不是系统钩子回调，
+/// 没有 LowLevelHooksTimeout 那一套，也不会像钩子那样在主线程上被强行插入执行。
 #[cfg(target_os = "windows")]
-fn current_foreground() -> isize {
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-    unsafe { GetForegroundWindow() as isize }
+unsafe extern "system" fn press_subclass(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+    _id: usize,
+    _data: usize,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS,
+    };
+    use windows_sys::Win32::UI::Input::{
+        GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RID_INPUT, RIM_TYPEMOUSE,
+    };
+    use windows_sys::Win32::UI::Shell::DefSubclassProc;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_DOWN, WM_INPUT,
+    };
+
+    if msg != WM_INPUT {
+        return unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+    }
+
+    // 打开弹窗的那一次点击也会走到这里。不等一下的话，弹窗会在显示的同一瞬间被
+    // 自己关掉——这是前面几版都踩过的坑。
+    let now = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+    if now.wrapping_sub(OPENED_AT.load(Ordering::SeqCst)) < 250 {
+        return unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+    }
+
+    // 取出这次输入事件，只看鼠标按键按下。
+    let mut raw: RAWINPUT = unsafe { std::mem::zeroed() };
+    let mut size = std::mem::size_of::<RAWINPUT>() as u32;
+    let header = std::mem::size_of::<RAWINPUTHEADER>() as u32;
+    let read = unsafe {
+        GetRawInputData(
+            lparam as HRAWINPUT,
+            RID_INPUT,
+            &mut raw as *mut _ as *mut core::ffi::c_void,
+            &mut size,
+            header,
+        )
+    };
+    if read == u32::MAX || raw.header.dwType != RIM_TYPEMOUSE {
+        return unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+    }
+    let flags = unsafe { raw.data.mouse.Anonymous.Anonymous.usButtonFlags } as u32;
+    let pressed = flags & (RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_RIGHT_BUTTON_DOWN);
+    if pressed == 0 {
+        return unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+    }
+
+    // 坐标一律用物理像素：GetCursorPos 和 DWM 的边框同属一套屏幕坐标，直接可比。
+    // 不去用 Tauri 的逻辑像素——DPI 缩放时两者差一个系数，那正是之前"矩形偏移"
+    // 40px 的来源。
+    let mut point = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut point) };
+
+    let mut rect: RECT = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+            &mut rect as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
+    // DWM 不给（比如旧系统）就退回 GetWindowRect：差一圈看不见的阴影边，但能用。
+    if ok != 0 {
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(
+                hwnd,
+                &mut rect as *mut _,
+            )
+        };
+    }
+
+    let inside = point.x >= rect.left
+        && point.y >= rect.top
+        && point.x < rect.right
+        && point.y < rect.bottom;
+    if !inside {
+        // 点在外面：收掉弹窗。这里不直接调 Tauri 的窗口 API（会派发回本线程），
+        // 而是投一条消息让事件循环去处理，本回调立刻返回。
+        if let Some(app) = SUBCLASS_APP.get() {
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || hide_update_popup(&handle));
+        }
+    }
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// 子类过程是裸函数指针、不能捕获环境，需要的东西放这儿。
+#[cfg(target_os = "windows")]
+static SUBCLASS_APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+/// 打开弹窗的时刻（毫秒时间戳），用来忽略"打开它的那一次点击"。
+/// 打开弹窗的点击本身也会经过子类过程，不挡住它，弹窗会在显示的同一瞬间被关掉。
+#[cfg(target_os = "windows")]
+static OPENED_AT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// 停止接收 Raw Input（弹窗关闭时调用）。
+///
+/// 不注销的话，弹窗关掉之后每条鼠标消息还会往一个已经隐藏的窗口投，白白唤醒事件
+/// 循环——这正是上一版"钩子变僵尸"的教训。子类过程一并摘掉，让它彻底回到原样。
+#[cfg(target_os = "windows")]
+fn stop_watching_presses() {
+    use windows_sys::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_REMOVE};
+    let device = RAWINPUTDEVICE {
+        usUsagePage: 0x01,
+        usUsage: 0x02,
+        dwFlags: RIDEV_REMOVE,
+        hwndTarget: std::ptr::null_mut(),
+    };
+    unsafe { RegisterRawInputDevices(&device, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32) };
+    // 摘子类。id 必须和挂上去时一致；找不到就说明本来没挂，不用管。
+    if let Some(app) = SUBCLASS_APP.get() {
+        if let Some(popup) = app.get_webview_window("update-popup") {
+            if let Ok(hwnd) = popup.hwnd() {
+                unsafe {
+                    windows_sys::Win32::UI::Shell::RemoveWindowSubclass(
+                        hwnd.0 as *mut core::ffi::c_void,
+                        Some(press_subclass),
+                        0x4453_4831,
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn current_foreground() -> isize {
-    0
-}
+fn watch_presses(_popup: tauri::WebviewWindow) {}
+
+#[cfg(not(target_os = "windows"))]
+fn stop_watching_presses() {}
 
 /// 让窗口不抢激活、但能接收鼠标（WS_EX_NOACTIVATE，系统菜单就是这么做的）。
 ///
 /// 这个窗口是置顶 + 不在任务栏的，Windows 本来就不给它前台；强行要它激活会
 /// 掉进一个死循环：拿到激活 → 立刻又被系统收回 → 收到"失活"消息 → 于是关掉
 /// 自己。既然它不需要键盘（Escape 由页面处理），那就干脆不要激活权——不激活
-/// 就没有失活，弹窗就不会自己消失；焦点始终留在主窗口上，点别处时主窗口照样
-/// 收到点击，由那边负责把弹窗关掉。
+/// 就没有失活，弹窗就不会自己消失。
 #[cfg(target_os = "windows")]
 fn make_non_activating(hwnd: isize) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -610,33 +795,6 @@ fn force_foreground(window: &tauri::WebviewWindow) {
 
 #[cfg(not(target_os = "windows"))]
 fn force_foreground(_window: &tauri::WebviewWindow) {}
-
-/// 前台窗口现在是不是别的程序（不是我们这个进程里的任何窗口）。
-///
-/// 这是判断"用户去点了别处"唯一可靠的依据。事件式的做法（监听自己的窗口失焦）
-/// 试过两轮都不行：
-///   * 弹窗是 WS_EX_NOACTIVATE，永远拿不到焦点，也就永远收不到失焦；
-///   * 主窗口的失焦消息既可能来自"切到别的程序"，也可能来自应用内部换窗口，
-///     分辨不出来——照单全收的结果就是弹窗刚出现就被自己关掉。
-/// 直接问系统"现在前台是谁"，答案是二值的，没有歧义。
-#[cfg(target_os = "windows")]
-fn foreground_is_other() -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
-
-    let foreground = unsafe { GetForegroundWindow() };
-    if foreground.is_null() {
-        // 没有前台窗口（非交互会话）——不能据此说人家点了别处。
-        return false;
-    }
-    let mut owner: u32 = 0;
-    unsafe { GetWindowThreadProcessId(foreground, &mut owner) };
-    owner != 0 && owner != std::process::id()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn foreground_is_other() -> bool {
-    false
-}
 
 /// Build the update popup window, hidden, so the first click only has to show it.
 ///
@@ -833,7 +991,6 @@ fn attach_content_webview(app: &tauri::AppHandle, url: Url, bridge: &Bridge) -> 
 
     // 克隆句柄供闭包使用（&self 接收者借用与闭包 move 冲突）
     let window_handle = window.clone();
-    let app_for_focus = app.clone();
     window.on_window_event(move |event| {
         match event {
             WindowEvent::Resized(size) => {
@@ -857,13 +1014,10 @@ fn attach_content_webview(app: &tauri::AppHandle, url: Url, bridge: &Bridge) -> 
             // 只收到消息还不够：启动阶段、应用内部换窗口也会让它响。所以收到后
             // 立刻同步问一句"现在前台是谁"，答案不是我们这个进程才关。两步都在
             // 同一瞬间完成，不等待任何周期。
-            WindowEvent::Focused(false) => {
-                if let Some(popup) = app_for_focus.get_webview_window("update-popup") {
-                    if popup.is_visible().unwrap_or(false) && foreground_is_other() {
-                        let _ = popup.hide();
-                    }
-                }
-            }
+            // 这里**刻意不处理**失焦。实测：这台环境里应用从未获得前台（前台恒为
+            // 远程桌面客户端），点 Edge、点桌面都不会让主窗口收到失焦消息，点弹窗
+            // 外面这件事只能靠鼠标钩子（见 watch_presses）。
+            _ => {}
             _ => {}
         }
     });
@@ -1334,13 +1488,7 @@ pub fn run() {
                     let _ = handle.emit("theme-changed", snapshot);
                 },
                 plugins.clone(),
-                move || {
-                    if let Some(popup) = press_handle.get_webview_window("update-popup") {
-                        if popup.is_visible().unwrap_or(false) {
-                            let _ = popup.hide();
-                        }
-                    }
-                },
+                move || hide_update_popup(&press_handle),
             )
             .map_err(|e| format!("bridge 启动失败: {e}"))?;
             plugins.set_bridge_base(bridge.base_url.clone());
