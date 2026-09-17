@@ -33,9 +33,13 @@ type ShellSettings = {
   harness_channel: string | null;
 } & Record<string, unknown>;
 
+/** Mirrors `update::HARNESS_CHANNELS` in the shell — the same list, in the same
+ *  order. A tag the registry publishes but this list omits is a channel nobody
+ *  can pick, which is what made a newer release look like "已是最新". */
 const CHANNELS: Array<{ value: string; label: string }> = [
   { value: "latest", label: "默认通道" },
   { value: "next", label: "抢先通道" },
+  { value: "alpha", label: "内测通道" },
 ];
 
 /**

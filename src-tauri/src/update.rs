@@ -44,9 +44,16 @@ const HARNESS_PACKAGE: &str = "@deepseek-ai/dsh";
 const UPDATE_ENDPOINT: &str =
     "https://github.com/XingLingQAQ/dsh-desktop/releases/latest/download/latest.json";
 
-/// Channels offered for the harness. npm has an `alpha` tag too; it trails both
-/// of these right now, so offering it would only be a way to downgrade.
-pub const HARNESS_CHANNELS: [&str; 2] = ["latest", "next"];
+/// Channels offered for the harness. Anything npm's registry actually publishes
+/// as a dist-tag is fair game here; the picker offers exactly what this list
+/// holds, so a channel that is missing from it is not "unavailable", it is
+/// invisible — the entry never appears and the choice cannot be made.
+///
+/// `alpha` used to be left out on the grounds that it trailed `latest`. It does
+/// not: the registry has run `latest` = `0.1.5-rc.2` alongside `alpha` =
+/// `0.1.6-alpha.2`, so omitting it hid the only channel with something newer on
+/// it, and the popup said "已是最新" while a later release sat there unreachable.
+pub const HARNESS_CHANNELS: [&str; 3] = ["latest", "next", "alpha"];
 
 /// The two Windows status codes this actually hits, neither of which means
 /// anything to a reader: the process could not start at all, or it was killed.
