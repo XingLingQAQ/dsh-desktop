@@ -44,13 +44,30 @@ const CHANNELS: Array<{ value: string; label: string }> = [
  * with nothing on it sees — so that one is worth saying in the interface's own
  * language. Anything unrecognised is shown as it came.
  */
-const CLIENT_ERROR_TEXT: Record<string, string> = {
-  "Could not fetch a valid release JSON from the remote":
+/**
+ * The updater crate reports in English, and its network messages are the ones a
+ * person actually sees: "error sending request for url (…)" says nothing about
+ * what to do. The common failures get a line in the interface's own language;
+ * anything unrecognised is shown as it came, because a wrong guess is worse than
+ * the original text.
+ */
+const CLIENT_ERROR_TEXT: Array<[RegExp, string]> = [
+  [
+    /Could not fetch a valid release JSON from the remote/,
     "更新源上还没有可用的发布清单（还没发布过版本）",
-};
+  ],
+  [/error sending request for url/i, "连不上更新服务器，请检查网络后重试"],
+  [/request timed out|operation timed out/i, "连接更新服务器超时，请重试"],
+  [/dns error|failed to lookup address/i, "无法解析更新服务器地址，请检查网络"],
+  [/certificate/i, "更新服务器的证书校验失败"],
+  [/当前已是最新版本/, "已是最新版本"],
+];
 
 function describeClientError(raw: string): string {
-  return CLIENT_ERROR_TEXT[raw] ?? raw;
+  for (const [pattern, text] of CLIENT_ERROR_TEXT) {
+    if (pattern.test(raw)) return text;
+  }
+  return raw;
 }
 
 function formatBytes(bytes: number): string {
@@ -116,6 +133,10 @@ function UpdatePopup() {
   }, []);
 
   const card = useRef<HTMLDivElement | null>(null);
+  // 进度监听器要读"现在是不是在下载"，但它挂在 mount 时的 effect 里、闭包捕获不到
+  // 后来的 busy。用 ref 让它总能读到当前值。
+  const busyRef = useRef<typeof busy>(busy);
+  busyRef.current = busy;
 
   // The window hugs its content: the popup is often mostly empty (collapsed
   // sections, no notes) and a panel taller than what it holds is both dead space
@@ -149,14 +170,20 @@ function UpdatePopup() {
     // 每一个事件带的是**这一块**的长度（updater 的 on_chunk 传的是
     // chunk.len()，不是累计值），所以要自己累加。直接把它当成已下载量的话，
     // 进度条会在每块之间来回跳，而不是一路往上走。
+    //
+    // 只在真的处于下载中才起进度条：命令的"查"和"下"是两段，只有后一段发事件，
+    // 但上一次下载的残留事件若飘过来，不能让它凭空点亮一条进度。
     const offProgress = listen<{ chunk: number; total: number | null }>(
       "update-progress",
       (event) =>
-        setProgress((current) => ({
-          chunk: (current?.chunk ?? 0) + event.payload.chunk,
-          // 总长可能来得晚（取决于是不是分块响应），有就用新的。
-          total: event.payload.total ?? current?.total ?? null,
-        })),
+        setProgress((current) => {
+          if (current === null && !busyRef.current) return current;
+          return {
+            chunk: (current?.chunk ?? 0) + event.payload.chunk,
+            // 总长可能来得晚（取决于是不是分块响应），有就用新的。
+            total: event.payload.total ?? current?.total ?? null,
+          };
+        }),
     );
     return () => {
       un.then((fn) => fn());
@@ -252,6 +279,11 @@ function UpdatePopup() {
   // called 检查并更新 expects is a fresh look. Only a real failure — an
   // unreachable host, a manifest that will not parse — lands in the notice, and
   // then the button is back so it can be pressed again.
+  // 主按钮：查一次，有货就顺手下来。
+  //
+  // 进度的起始点由**第一条进度事件**决定，不在这里预设：这个命令先是查清单、
+  // 然后才下载，只有下载阶段会发进度。提前摆出进度条的话，纯粹"查一下"也会闪出
+  // 一条在动的条子（什么都不下的时候尤其刺眼）——那是检查，不是下载。
   const checkAndDownload = async () => {
     if (hasPayload) {
       await installClient();
@@ -259,7 +291,7 @@ function UpdatePopup() {
     }
     setBusy("download");
     setNotice(null);
-    setProgress({ chunk: 0, total: null });
+    setProgress(null);
     try {
       const next = await invoke<ClientUpdate>("download_client_update");
       setReport((current) => (current === null ? current : { ...current, client: next }));
