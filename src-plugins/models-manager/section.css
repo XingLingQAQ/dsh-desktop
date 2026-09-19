@@ -51,3 +51,198 @@
   outline-offset: 2px;
   border-radius: 4px;
 }
+
+/* ── 渠道 (ProvidersTab) ────────────────────────────────────────────────────
+ *
+ * The provider list this plugin owns. Nothing here is adopted from another
+ * plugin's markup, so every class is local and the layout is free to be
+ * whatever reads best: identity on the left, key state on the right, the
+ * editor folded under the row it belongs to.
+ */
+
+.dsx-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dsx-providers-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dsx-providers-title {
+  margin: 0 0 2px;
+  font-size: var(--dsw-font-s-16-font-size);
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-providers-note {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--dsw-font-s-13-font-size);
+  line-height: 1.5;
+}
+
+.dsx-providers-error {
+  color: var(--dsw-alias-label-error, #c0392b);
+}
+
+.dsx-providers-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.dsx-providers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dsx-provider {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+/* The open row keeps a visible edge so the editor below reads as part of it
+   rather than as the next channel in the list. */
+.dsx-provider[data-open='true'] {
+  border-color: var(--dsw-alias-border-l3);
+}
+
+.dsx-provider-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 10px;
+  color: inherit;
+  font-family: inherit;
+  font-size: var(--dsw-font-s-14-font-size);
+  text-align: left;
+  cursor: pointer;
+}
+
+.dsx-provider-head:hover {
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.dsx-provider-name {
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-provider-route {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: var(--dsw-font-s-12-font-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.dsx-provider-tag {
+  padding: 1px 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--dsw-font-s-12-font-size);
+}
+
+.dsx-provider-tag-off {
+  opacity: 0.7;
+}
+
+/* The spacer is what keeps the state group right-aligned without a grid. */
+.dsx-provider-head > .dsx-provider-dot {
+  margin-left: auto;
+}
+
+.dsx-provider-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary);
+  flex: none;
+}
+
+.dsx-provider-dot[data-state='on'] {
+  background: var(--dsw-alias-label-success, #2f9e44);
+}
+
+.dsx-provider-dot[data-state='off'] {
+  background: var(--dsw-alias-label-warning, #e8590c);
+}
+
+.dsx-provider-state {
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--dsw-font-s-12-font-size);
+}
+
+.dsx-provider-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+
+.dsx-provider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dsx-provider-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--dsw-font-s-13-font-size);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsx-provider-hint {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: var(--dsw-font-s-12-font-size);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.dsx-provider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dsx-provider-row > .dsx-input {
+  flex: 1 1 auto;
+}
+
+.dsx-input {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: var(--dsw-font-s-13-font-size);
+}
+
+.dsx-input:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-focus, #4c8dff);
+  outline-offset: -1px;
+}
+
+.dsx-input:disabled {
+  opacity: 0.6;
+}

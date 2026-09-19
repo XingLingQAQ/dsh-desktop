@@ -1,5 +1,16 @@
 /**
- * Model listing for the Models settings page, on the Host side.
+ * Model listing *and* channel inventory for the Models settings page, on the
+ * Host side.
+ *
+ * The channel half of this plugin exists because the page cannot read that
+ * document from the browser: DSH's client-side `connection` handle changed
+ * shape — the version that ships now carries
+ * `isLoopback/generation/state/rpc/reconnect/…` and no `api` member at all — so
+ * the `connection.api.settings.describe(...)` calls the old page made are not
+ * reachable from a plugin any more. The Host's own `settings`, `credentials`
+ * and `llm` services are stable and are exactly what those calls were a wire
+ * projection of, so the page asks this route instead. Same-origin, no CORS, no
+ * bridge token, and no private client API to track.
  *
  * The settings card's 「获取可用模型」 button is answered by the harness's own
  * pi-ai discovery, which by design reads `GET /models` from the two
@@ -93,13 +104,38 @@ async function serve(ctx, req, res) {
       return
     }
     const method = new URL(req.url ?? '/', 'http://dsh.internal').pathname.slice(`${PREFIX}/`.length)
-    if (method !== 'discover') {
-      send(res, 404, { ok: false, error: { message: `没有这个接口:${method}` } })
+    if (method === 'discover') {
+      const request = JSON.parse(await readBody(req))
+      const models = await discover(ctx, request)
+      send(res, 200, { ok: true, models })
       return
     }
-    const request = JSON.parse(await readBody(req))
-    const models = await discover(ctx, request)
-    send(res, 200, { ok: true, models })
+    if (method === 'providers') {
+      send(res, 200, { ok: true, ...await listProviders(ctx) })
+      return
+    }
+    if (method === 'credential') {
+      const request = JSON.parse(await readBody(req))
+      send(res, 200, await storeCredential(ctx, request))
+      return
+    }
+    if (method === 'describe') {
+      const settings = ctx.get('settings')
+      send(res, 200, {
+        ok: true,
+        writable: settings?.writable !== false,
+        namespaces: settings === undefined
+          ? []
+          : settings.describe({ redactSecrets: true }),
+      })
+      return
+    }
+    if (method === 'advanced') {
+      const request = JSON.parse(await readBody(req))
+      send(res, 200, { ok: true, ...await writeAdvanced(ctx, request) })
+      return
+    }
+    send(res, 404, { ok: false, error: { message: `没有这个接口:${method}` } })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     send(res, 200, { ok: false, error: { message } })
@@ -162,6 +198,176 @@ function send(res, status, payload) {
     'content-length': Buffer.byteLength(body),
   })
   res.end(body)
+}
+
+/**
+ * Every channel the page lists: the configurable-provider directory joined with
+ * the settings document and the credential store.
+ *
+ * This is the same join the native Models page performs in the browser — the
+ * directory for identity, `settings.describe` for the stored profile, and
+ * `credentials.describe` for whether the referenced key is actually held. All
+ * three are Host services, which is the point: nothing here depends on the
+ * client-side connection handle the page can no longer reach.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ * @returns `{ writable, providers }`, each provider carrying its own state.
+ */
+async function listProviders(ctx) {
+  const settings = ctx.get('settings')
+  const llm = ctx.get('llm')
+  if (settings === undefined || llm === undefined) {
+    return { writable: false, providers: [] }
+  }
+  // Redacted on purpose: this response crosses to the page, and a stored secret
+  // must never be part of it. `configured` is the fact the page wants anyway.
+  const described = settings.describe({ redactSecrets: true })
+  const byNs = new Map(described.map(entry => [entry.ns, entry]))
+  const directory = typeof llm.listConfigurableProviders === 'function'
+    ? llm.listConfigurableProviders()
+    : []
+  // `listProviders` answers with metadata records, not bare ids, so the id is
+  // read off each one — a Set of the records themselves would match nothing and
+  // every channel would render as unregistered.
+  const active = new Set(
+    (typeof llm.listProviders === 'function' ? llm.listProviders() : [])
+      .map(entry => text(entry?.provider ?? entry?.id))
+      .filter(id => id !== undefined),
+  )
+
+  const profiles = directory.map((entry) => {
+    const view = byNs.get(entry.settingsNs)
+    const path = Array.isArray(entry.settingsPath) ? entry.settingsPath : []
+    const profile = valueAt(view?.value, path)
+    return {
+      provider: entry.provider,
+      displayName: text(entry.displayName) ?? entry.provider,
+      settingsNs: entry.settingsNs,
+      settingsPath: path,
+      declared: entry.declared === true,
+      active: active.has(entry.provider),
+      namespace: view,
+      profile,
+      keyRef: text(profile?.apiKeyEnv),
+    }
+  })
+
+  const refs = [...new Set(profiles.flatMap(row => row.keyRef === undefined ? [] : [row.keyRef]))]
+  const held = new Set()
+  if (refs.length > 0) {
+    const credentials = ctx.get('credentials')
+    for (const ref of refs) {
+      try {
+        const info = await credentials?.describe(ref)
+        // `configured` is the seam's own answer and already treats an empty
+        // stored value as absent, so it is used verbatim rather than inferred
+        // from a resolve() that would hand back the secret itself.
+        if (info?.configured === true) held.add(ref)
+      } catch {
+        // A composition without the credential seam leaves the dot unknown,
+        // which renders as "not configured" rather than failing the list.
+      }
+    }
+  }
+
+  return {
+    writable: settings.writable !== false,
+    providers: profiles.map(({ namespace, profile, ...row }) => ({
+      ...row,
+      configured: namespace !== undefined && (row.settingsPath.length === 0 || profile !== undefined),
+      keyConfigured: row.keyRef !== undefined && held.has(row.keyRef),
+      revision: namespace?.revision,
+    })),
+  }
+}
+
+/**
+ * Store one channel's key, and point its profile at the reference if the
+ * profile names none.
+ *
+ * The reference is derived the way the native page derives it, so a key typed
+ * here lands where the adapter already looks instead of under a second name.
+ * The profile is only touched when it names no reference: a route with its own
+ * auth path must not be handed one.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ * @param {Record<string, unknown>} request - `{ provider, settingsNs, settingsPath, ref, value }`.
+ * @returns an envelope for the page.
+ */
+async function storeCredential(ctx, request) {
+  const credentials = ctx.get('credentials')
+  const settings = ctx.get('settings')
+  if (credentials === undefined || settings === undefined) {
+    return { ok: false, error: { message: '这个宿主没有提供密钥存储。' } }
+  }
+  const value = text(request.value)
+  const provider = text(request.provider)
+  const ref = text(request.ref) ?? (provider === undefined ? undefined : derivedRef(provider))
+  if (value === undefined || ref === undefined) {
+    return { ok: false, error: { message: '缺少密钥或渠道名。' } }
+  }
+  try {
+    await credentials.set(ref, value)
+    const ns = text(request.settingsNs)
+    const path = Array.isArray(request.settingsPath) ? request.settingsPath.map(String) : []
+    if (ns !== undefined && request.attachRef === true) {
+      await settings.mutate(ns, [{ op: 'set', path: [...path, 'apiKeyEnv'], value: ref }])
+    }
+    return { ok: true, ref }
+  } catch (error) {
+    return { ok: false, error: { message: error instanceof Error ? error.message : String(error) } }
+  }
+}
+
+/**
+ * Write one channel profile's advanced fields.
+ *
+ * `settings.mutate` takes path ops, and that is what the caller sends: each op
+ * names only a field the form actually changed, so a field neither side touched
+ * produces no op and cannot be deleted by the other editor.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ * @param {Record<string, unknown>} request - `{ ns, ops, expectedRevision }`.
+ * @returns an envelope for the page.
+ */
+async function writeAdvanced(ctx, request) {
+  const settings = ctx.get('settings')
+  if (settings === undefined) {
+    return { ok: false, error: { message: '这个宿主没有提供设置服务。' } }
+  }
+  const ns = text(request.ns)
+  const ops = Array.isArray(request.ops) ? request.ops : []
+  if (ns === undefined || ops.length === 0) return { ok: true }
+  try {
+    const revision = typeof request.expectedRevision === 'number' ? request.expectedRevision : undefined
+    await settings.mutate(ns, ops, revision)
+    const described = settings.describe({ redactSecrets: true }).find(entry => entry.ns === ns)
+    return { ok: true, revision: described?.revision }
+  } catch (error) {
+    return { ok: false, error: { message: error instanceof Error ? error.message : String(error) } }
+  }
+}
+
+/**
+ * The conventional credential reference for a route, matching what the native
+ * page derives so both name the same record.
+ * @param {string} provider - the route id.
+ * @returns the reference name.
+ */
+function derivedRef(provider) {
+  return `${provider.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`
+}
+
+/**
+ * Read a nested member out of an untyped document.
+ * @param {unknown} value - the document.
+ * @param {readonly string[]} path - the member path.
+ * @returns the value at the path, or undefined.
+ */
+function valueAt(value, path) {
+  let current = value
+  for (const key of path) {
+    if (typeof current !== 'object' || current === null || Array.isArray(current)) return undefined
+    current = current[key]
+  }
+  return current
 }
 
 /**

@@ -1,74 +1,36 @@
 /**
- * The 渠道 tab's advanced panel: the per-route settings the native provider
- * card leaves to `settings.yaml`.
+ * The 渠道 page's per-route advanced block: the settings the channel list does
+ * not surface — timeouts, retries, transport, compatibility flags.
  *
- * It renders *inside* the native provider editor — the card that opens under a
- * channel when the user presses 编辑 — as one more disclosure next to the
- * adapter's own 自定义 block. There is no separate card and no provider picker:
- * the editor already says which channel it is, so the panel under it edits that
- * one.
+ * It renders under one channel card in `ProvidersTab`, as a disclosure next to
+ * the key field. There is no provider picker: the card it sits in says which
+ * channel it is, and the route arrives as a prop.
  *
- * The editor is not ours to edit. ui-settings-models renders it and declares no
- * slot for it, so it is adopted from the outside the same way `NativeSelects`
- * adopts the `<select>`s in that same card: the footer is found in the DOM, a
- * container is put just above it, and the block is portalled into that container.
- * Closing the editor removes the whole subtree, container included, and the
- * portal is released — nothing here has to know that a close happened.
- *
- * Which channel a block belongs to is read the same way: the editor header names
- * the route, or its display name when the two differ. That is only an identity
- * to look the profile up by; *what* may be edited still comes from
- * `settings.describe` and `llm.providers`, exactly as when this was a panel of
- * its own.
+ * This used to be adopted into the *native* provider editor from the outside —
+ * the mirror found that editor's footer in the DOM and portalled a block in
+ * above it, reading the channel's identity off the editor's header. The mirror
+ * is gone (it could not survive the native page's child-slot declarations; see
+ * `ProvidersTab`), and the DOM guessing went with it. What remains is the part
+ * that never depended on the mirror: the catalog read and the profile editor.
  *
  * Writes go through `settings.mutate` with the same one-op-per-top-level-key
- * discipline the native card uses, against the same stored section, so the two
- * editors cannot delete each other's fields: each names only what it changed,
- * and a key neither touched produces no op at all.
+ * discipline the native card uses, against the same stored section, so two
+ * editors of one profile cannot delete each other's fields: each names only what
+ * it changed, and a key neither touched produces no op at all.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import type { ReactNode, RefObject } from 'react'
+import type { ReactNode } from 'react'
 import {
   Button, IconRefreshOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   deletePath, draftOf, getPath, hasPath, hintFor, labelFor, optionLabel, pathOps,
-  profileFields, schemaRoot, setPath, unwrap,
-  type AdvancedApi, type ConfigurableProviderView, type FieldSpec,
-  type SettingsNamespaceView,
+  profileFields, schemaRoot, setPath,
+  type FieldSpec,
 } from './advanced.ts'
+import { writeAdvanced, type NamespaceView } from './providers.ts'
 import { Chooser, IconAction } from './controls.tsx'
-
-type CatalogState =
-  | { status: 'loading' }
-  | { status: 'error'; message: string }
-  | {
-    status: 'ready'
-    writable: boolean
-    providers: readonly ConfigurableProviderView[]
-    namespaces: Map<string, SettingsNamespaceView>
-  }
-
-/** One open provider editor, and the identity read off its header. */
-interface Slot {
-  /** Stable across passes: the editor element never changes while it is open. */
-  key: string
-  /** The container inserted above the editor's footer, portalled into. */
-  host: HTMLDivElement
-  /** The route id, when the header names it. */
-  route: string | undefined
-  /** The display name, which is all the header carries for a shipped route. */
-  title: string
-}
-
-/** Read the text of the first descendant matching a class token, or nothing. */
-function textOf(root: Element, token: string): string | undefined {
-  const found = root.querySelector(`[class*="${token}"]`)
-  const text = found?.textContent?.trim()
-  return text === undefined || text.length === 0 ? undefined : text
-}
 
 /** Object a value addresses, or an empty one. */
 function objectAt(value: unknown): Record<string, unknown> {
@@ -86,176 +48,31 @@ function pick(source: Record<string, unknown>, kept: ReadonlySet<string>): Recor
   return out
 }
 
-/** True when two passes found the same editors for the same channels. */
-function sameSlots(before: readonly Slot[], after: readonly Slot[]): boolean {
-  return before.length === after.length
-    && before.every((slot, index) => {
-      const other = after[index]
-      return other !== undefined
-        && slot.key === other.key
-        && slot.host === other.host
-        && slot.route === other.route
-        && slot.title === other.title
-    })
-}
-
 /**
- * Watch a mirrored subtree for open provider editors and report one slot per
- * editor.
+ * One channel profile's advanced fields: timeouts, retries, transport,
+ * compatibility — the settings the channel list does not surface.
  *
- * The footer is the anchor rather than the card around it: the card's class is
- * this component's own business, while a footer is what every editor has to
- * render for its own save button to exist. The card is whatever holds that
- * footer.
- * @param scope - the subtree holding the mirrored provider page.
- * @returns one slot per open editor, each with the container to portal into.
+ * Writes go through this desktop's host route, not the client connection
+ * handle: that handle has no `api` member in the build that ships, so the
+ * `settings.mutate` call this used to make is not reachable from a plugin any
+ * more. The route forwards the same path ops to the Host's `settings` service,
+ * which is what the wire call was a projection of.
+ *
+ * Only the keys this block renders take part in the draft. The profile also
+ * carries what the channel list owns — the key reference, the endpoint — and a
+ * draft that included them would offer to "reset" fields it cannot show.
+ * @param props.namespace - the settings namespace the profile lives in.
+ * @param props.settingsPath - the profile's path inside that namespace.
+ * @param props.writable - whether the settings document may be written.
+ * @param props.onReload - re-read the page after a write.
  */
-function useEditorPortals(scope: RefObject<HTMLElement | null>): readonly Slot[] {
-  const [slots, setSlots] = useState<readonly Slot[]>([])
-  const seq = useRef(0)
-
-  useEffect(() => {
-    const root = scope.current
-    if (root === null) return
-    const hosts = new Map<Element, { host: HTMLDivElement; key: string }>()
-
-    const sync = (): void => {
-      const next: Slot[] = []
-      for (const footer of root.querySelectorAll('[class*="editorActions"]')) {
-        const editor = footer.parentElement
-        if (editor === null) continue
-        const title = textOf(editor, 'editorTitle')
-        // The add card renders the same footer but no header: there is no
-        // channel to look up yet, and writing a profile for one the user has
-        // not created would create it as a side effect of setting a timeout.
-        if (title === undefined) continue
-        let entry = hosts.get(editor)
-        if (entry === undefined) {
-          seq.current += 1
-          const host = document.createElement('div')
-          host.className = 'dsx-advancedHost'
-          editor.insertBefore(host, footer)
-          entry = { host, key: `advanced-${String(seq.current)}` }
-          hosts.set(editor, entry)
-        }
-        next.push({ key: entry.key, host: entry.host, route: textOf(editor, 'editorRoute'), title })
-      }
-      // React has to let go of a portal before its container leaves the
-      // document, or the unmount reaches a detached node; a microtask is after
-      // the commit this pass is in.
-      for (const [editor, entry] of [...hosts]) {
-        if (editor.isConnected && root.contains(editor)) continue
-        hosts.delete(editor)
-        queueMicrotask(() => { entry.host.remove() })
-      }
-      setSlots(current => (sameSlots(current, next) ? current : next))
-    }
-
-    // Child lists only: this pass writes an attribute on its own containers, and
-    // watching attributes would make every one of those writes a reason to run.
-    const observer = new MutationObserver(sync)
-    observer.observe(root, { childList: true, subtree: true })
-    sync()
-    return () => {
-      observer.disconnect()
-      for (const entry of hosts.values()) {
-        queueMicrotask(() => { entry.host.remove() })
-      }
-    }
-  }, [scope])
-
-  return slots
-}
-
-/**
- * Read the catalog and put a block into every open provider editor.
- * @param props.api - the connection face the settings and provider reads go
- *   through (see `AdvancedApi`).
- * @param props.scope - the element holding the mirrored provider page.
- */
-export function ChannelAdvanced({ api, scope }: {
-  api: AdvancedApi
-  scope: RefObject<HTMLElement | null>
-}): ReactNode {
-  const [catalog, setCatalog] = useState<CatalogState>({ status: 'loading' })
-  const [attempt, setAttempt] = useState(0)
-
-  useEffect(() => {
-    let live = true
-    setCatalog({ status: 'loading' })
-    Promise.all([api.settings.describe({}), api.llm.providers({})]).then(
-      ([described, listed]) => {
-        if (!live) return
-        const describedValue = unwrap(described)
-        const namespaces = new Map(describedValue.namespaces.map(view => [view.ns, view]))
-        const providers = unwrap(listed).providers.filter((entry) => {
-          // No settings address means the route was registered outside the
-          // configurable directory: there is no profile for this page to edit.
-          if (entry.settingsNs.length === 0) return false
-          const view = namespaces.get(entry.settingsNs)
-          if (view === undefined) return false
-          // Only channels the user actually has. A catalog route that is
-          // neither live nor stored is one they have not added, and editing it
-          // here would materialize a profile as a side effect of setting a
-          // timeout — a change nobody asked a "refine this channel" panel for.
-          return entry.active || hasPath(view.user, entry.settingsPath)
-        })
-        setCatalog({
-          status: 'ready',
-          writable: describedValue.writable,
-          providers,
-          namespaces,
-        })
-      },
-      (error: unknown) => {
-        if (live) {
-          setCatalog({ status: 'error', message: error instanceof Error ? error.message : String(error) })
-        }
-      },
-    )
-    return () => { live = false }
-  }, [api, attempt])
-
-  const slots = useEditorPortals(scope)
-  const blockFor = (slot: Slot): ReactNode => {
-    if (catalog.status === 'loading') return <p className="dsx-advanced-note">读取配置中…</p>
-    if (catalog.status === 'error') {
-      return <p className="dsx-advanced-error" role="alert">{catalog.message}</p>
-    }
-    // The header names the route for a hand-declared channel and the display
-    // name otherwise; the route is the exact answer, so it is tried first.
-    const target = catalog.providers.find(entry => entry.provider === slot.route)
-      ?? catalog.providers.find(entry => entry.displayName === slot.title)
-    const namespace = target === undefined ? undefined : catalog.namespaces.get(target.settingsNs)
-    if (target === undefined || namespace === undefined) return null
-    return (
-      <ProfileAdvanced
-        key={`${namespace.ns} ${target.settingsPath.join(' ')}`}
-        api={api}
-        namespace={namespace}
-        settingsPath={target.settingsPath}
-        writable={catalog.writable}
-        onReload={() => { setAttempt(value => value + 1) }}
-      />
-    )
-  }
-
-  return (
-    <>
-      {slots.map(slot => createPortal(blockFor(slot), slot.host, slot.key))}
-    </>
-  )
-}
-
-/** One provider profile's advanced fields. */
-function ProfileAdvanced({ api, namespace, settingsPath, writable, onReload }: {
-  api: AdvancedApi
-  namespace: SettingsNamespaceView
+export function AdvancedFields({ namespace, settingsPath, writable, onReload }: {
+  namespace: NamespaceView
   settingsPath: readonly string[]
   writable: boolean
   onReload: () => void
 }): ReactNode {
-  const [view, setView] = useState(namespace)
+  const [view, setView] = useState<NamespaceView>(namespace)
   const root = useMemo(() => schemaRoot(view.schema), [view.schema])
   const fields = useMemo(() => profileFields(root, settingsPath), [root, settingsPath])
   // Only the keys this panel renders take part in the draft. The profile also
@@ -291,26 +108,14 @@ function ProfileAdvanced({ api, namespace, settingsPath, writable, onReload }: {
     try {
       const ops = pathOps(settingsPath, committed, draft)
       if (ops.length === 0) return
-      const response = await api.settings.mutate({
-        ns: view.ns,
-        ops,
-        expectedRevision: revision,
-      })
-      if (!response.result.ok) {
-        setFailure(response.result.error.code === 'settings-conflict'
-          ? '配置在别处被改过了,点「重新读取」再看一遍。'
-          : response.result.error.message)
-        return
-      }
-      const next = response.result.value
-      // The write's own answer is the new baseline: refetching could race a
-      // further edit, and the response already carries the stored user layer.
-      setView(next)
-      const stored = pick(draftOf(next, settingsPath), owned)
-      setCommitted(stored)
-      setDraft(stored)
-      setRevision(next.revision)
+      const answer = await writeAdvanced(view.ns, ops, revision)
+      // The write reports the revision it left behind; the stored layer is
+      // re-read from the page rather than reconstructed, because the host is
+      // the only side that can say what the document now holds after redaction.
+      if (answer.revision !== undefined) setRevision(answer.revision)
+      setCommitted(draft)
       setSaved(true)
+      onReload()
     } catch (error) {
       setFailure(error instanceof Error ? error.message : String(error))
     } finally {
