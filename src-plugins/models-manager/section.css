@@ -353,3 +353,43 @@
   align-items: flex-start;
   gap: 12px;
 }
+
+/* The add affordance, from the native `addButton`: a dashed 44px outline at
+   16px radius, sitting under the list rather than beside it. */
+.dsx-providers-add {
+  display: flex;
+}
+
+.dsx-providers-addButton {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1 1 0;
+  min-width: 180px;
+  height: 44px;
+  padding: 0 14px;
+  border: 1px dashed var(--dsw-alias-border-l3);
+  border-radius: 16px;
+  background: none;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.dsx-providers-addButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsx-providers-addButton:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.dsx-providers-addButton:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-alias-border-l3);
+  outline: none;
+}

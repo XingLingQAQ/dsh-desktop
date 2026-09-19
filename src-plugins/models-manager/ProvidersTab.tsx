@@ -52,6 +52,7 @@ export function ProvidersTab(): ReactNode {
   const [catalog, setCatalog] = useState<CatalogState>({ status: 'loading' })
   const [attempt, setAttempt] = useState(0)
   const [openId, setOpenId] = useState<string | null>(null)
+  const [adding, setAdding] = useState(false)
 
   useEffect(() => {
     let live = true
@@ -94,20 +95,34 @@ export function ProvidersTab(): ReactNode {
 
   const { rows, writable, namespaces } = catalog
 
+  // Only the channels that are actually set up belong on the page. The rest of
+  // the directory is a *catalog* — forty-odd shipped routes the adapter can
+  // serve — and dumping it here is what made this page read as a wall of noise
+  // instead of the native one. The native page draws the same line:
+  //
+  //   configured = rows.filter(row => row.configured)
+  //   addable    = configurable.filter(row => !row.configured)
+  //
+  // with everything unconfigured reachable only through the add affordance.
+  // A route counts as configured when its namespace resolved and either it has
+  // no settings address of its own or a profile exists at that address.
+  const configured = rows.filter(row => row.configured)
+  const addable = rows.filter(row => !row.configured && namespaces.has(row.settingsNs))
+
   return (
     <div className="dsx-providers">
       <h3 className="dsx-providers-title">渠道</h3>
       <p className="dsx-providers-note">
         {writable
-          ? '这里是当前部署可以配置的模型渠道。'
+          ? '配置和查看本部署的模型渠道。'
           : '当前设置是只读的，改动无法保存。'}
       </p>
 
-      {rows.length === 0
-        ? <p className="dsx-providers-note">还没有可配置的渠道。</p>
+      {configured.length === 0
+        ? <p className="dsx-providers-note">还没有配置任何渠道。</p>
         : (
           <ul className="dsx-providers-list">
-            {rows.map((row) => (
+            {configured.map((row) => (
               <ChannelCard
                 key={row.provider}
                 row={row}
@@ -122,6 +137,43 @@ export function ProvidersTab(): ReactNode {
             ))}
           </ul>
         )}
+
+      {addable.length > 0 && (
+        <div className="dsx-providers-add">
+          <button
+            type="button"
+            className="dsx-providers-addButton"
+            disabled={!writable}
+            onClick={() => { setAdding(true) }}
+          >
+            ＋ 添加渠道
+          </button>
+        </div>
+      )}
+
+      {adding && (
+        <ul className="dsx-providers-list">
+          {addable.map((row) => (
+            <li key={row.provider} className="dsx-provider">
+              <div className="dsx-provider-head">
+                <span className="dsx-provider-identity">
+                  <span className="dsx-provider-name">{row.displayName}</span>
+                  <span className="dsx-provider-route">{row.provider}</span>
+                </span>
+                <span className="dsx-provider-actions">
+                  <button
+                    type="button"
+                    className="dsx-provider-action"
+                    onClick={() => { setOpenId(row.provider); setAdding(false) }}
+                  >
+                    配置
+                  </button>
+                </span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
