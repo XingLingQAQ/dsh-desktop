@@ -29,9 +29,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
-  Button, IconRefreshOutline16,
-} from '@deepseek-ai/dsh-client-ui-primitives'
-import {
   readProviders, readNamespaces, saveKey,
   type ChannelRow, type NamespaceView,
 } from './providers.ts'
@@ -90,7 +87,7 @@ export function ProvidersTab(): ReactNode {
     return (
       <div className="dsx-providers-empty">
         <p className="dsx-providers-note dsx-providers-error">{catalog.message}</p>
-        <Button onClick={reload}>重试</Button>
+        <button type="button" className="dsx-provider-save" onClick={reload}>重试</button>
       </div>
     )
   }
@@ -99,18 +96,12 @@ export function ProvidersTab(): ReactNode {
 
   return (
     <div className="dsx-providers">
-      <div className="dsx-providers-head">
-        <div>
-          <h3 className="dsx-providers-title">渠道</h3>
-          <p className="dsx-providers-note">
-            {writable ? '这些是当前部署已注册的模型渠道。' : '当前设置是只读的，无法修改渠道。'}
-          </p>
-        </div>
-        <Button variant="outline" onClick={reload}>
-          <IconRefreshOutline16 aria-hidden="true" />
-          刷新
-        </Button>
-      </div>
+      <h3 className="dsx-providers-title">渠道</h3>
+      <p className="dsx-providers-note">
+        {writable
+          ? '这里是当前部署可以配置的模型渠道。'
+          : '当前设置是只读的，改动无法保存。'}
+      </p>
 
       {rows.length === 0
         ? <p className="dsx-providers-note">还没有可配置的渠道。</p>
@@ -149,23 +140,35 @@ function ChannelCard({ row, namespaces, writable, open, onToggle, onChanged }: {
     [namespaces, row.settingsNs],
   )
   return (
-    <li className="dsx-provider" data-open={open ? 'true' : undefined}>
-      <button type="button" className="dsx-provider-head" onClick={onToggle}>
-        <span className="dsx-provider-name">{row.displayName}</span>
-        <span className="dsx-provider-route">{row.provider}</span>
-        {row.declared === true && <span className="dsx-provider-tag">自定义</span>}
-        {!row.active && <span className="dsx-provider-tag dsx-provider-tag-off">未注册</span>}
-        <span
-          className="dsx-provider-dot"
-          data-state={row.keyRef === undefined ? 'none' : row.keyConfigured ? 'on' : 'off'}
-          aria-hidden="true"
-        />
-        <span className="dsx-provider-state">
-          {row.keyRef === undefined
-            ? '无需密钥'
-            : row.keyConfigured ? '已配置密钥' : '未配置密钥'}
+    <li className="dsx-provider">
+      {/* Identity left, actions right — the native row's own shape. The dot is
+          that page's whole key-state readout, and its accessible name carries
+          the same fact, so sighted and screen-reader readers agree. */}
+      <div className="dsx-provider-head">
+        <span className="dsx-provider-identity">
+          <span className="dsx-provider-name">{row.displayName}</span>
+          {row.declared === true && <span className="dsx-provider-tag">自定义</span>}
+          {row.keyRef !== undefined && (
+            <span
+              className="dsx-provider-dot"
+              data-state={row.keyConfigured ? 'on' : 'off'}
+              role="img"
+              aria-label={row.keyConfigured ? '已配置密钥' : '未配置密钥'}
+              title={row.keyConfigured ? '已配置密钥' : '未配置密钥'}
+            />
+          )}
         </span>
-      </button>
+        <span className="dsx-provider-actions">
+          <button
+            type="button"
+            className="dsx-provider-action"
+            aria-expanded={open}
+            onClick={onToggle}
+          >
+            {open ? '收起' : '编辑'}
+          </button>
+        </span>
+      </div>
       {open && (
         <div className="dsx-provider-body">
           <CredentialRow row={row} writable={writable} onChanged={onChanged} />
@@ -239,12 +242,17 @@ function CredentialRow({ row, writable, onChanged }: {
           disabled={disabled}
           onChange={(event) => { setDraft(event.target.value) }}
         />
-        <Button onClick={() => void save()} disabled={disabled || draft.length === 0}>
+        <button
+          type="button"
+          className="dsx-provider-save"
+          disabled={disabled || draft.length === 0}
+          onClick={() => void save()}
+        >
           {busy ? '保存中…' : '保存'}
-        </Button>
+        </button>
       </div>
-      {error !== null && <p className="dsx-providers-note dsx-providers-error">{error}</p>}
-      {done && error === null && <p className="dsx-providers-note">密钥已保存。</p>}
+      {error !== null && <p className="dsx-providers-note dsx-providers-error" role="alert">{error}</p>}
+      {done && error === null && <p className="dsx-providers-note dsx-providers-saved" role="status">密钥已保存。</p>}
     </div>
   )
 }
