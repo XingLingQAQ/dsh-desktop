@@ -30,7 +30,19 @@ const PLATFORM = [
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
+  // Type-only in every place it is imported, so nothing is emitted for it —
+  // listing it here only keeps resolution from failing at build time.
+  '@deepseek-ai/dsh-api-remotes/client',
+  '@deepseek-ai/dsh-api-remotes',
+  '@deepseek-ai/dsh-host-apiproxy/api/events.schema',
+  '@deepseek-ai/dsh-host-apiproxy/api/rpc.schema',
 ]
+
+// Schemastery is DSH's own schema library, shipped in the harness's vendor
+// tree rather than published to npm. The vendored settings-schema service
+// bundles that copy so a draft validated here is validated by the same code
+// the host uses — a stand-in would accept drafts the host then refuses.
+const SCHEMASTERY = String.raw`C:/Users/XingLingQAQ/AppData/Roaming/DeepSeek Harness/harness-versions/f27891ffad9b8bdf/vendor/schemastery/lib/index.mjs`
 
 const PLUGINS = [
   { id: '@dsh-desktop/store', entry: 'src-plugins/store/index.tsx', out: 'store.js' },
@@ -39,6 +51,9 @@ const PLUGINS = [
 ]
 
 export default defineConfig({
+  resolve: {
+    alias: { '@deepseek-ai/schemastery': SCHEMASTERY },
+  },
   // The shell's own config owns `src/`; this one only builds plugin bundles.
   root: __dirname,
   esbuild: { jsx: 'automatic', jsxImportSource: 'react' },

@@ -38,7 +38,6 @@ import { McpPanel } from './McpPanel.tsx'
 import controlsStyles from './controls.css?inline'
 import sectionStyles from './section.css?inline'
 import skillsStyles from './skills.css?inline'
-import advancedStyles from './advanced.css?inline'
 import mcpStyles from './mcp.css?inline'
 
 /** Cordis plugin name. */
@@ -60,7 +59,7 @@ if (document.getElementById(STYLE_ID) === null) {
   const el = document.createElement('style')
   el.id = STYLE_ID
   el.setAttribute('data-plugin', '@dsh-desktop/models-manager')
-  el.textContent = [controlsStyles, sectionStyles, skillsStyles, advancedStyles, mcpStyles].join('\n')
+  el.textContent = [controlsStyles, sectionStyles, skillsStyles, mcpStyles].join('\n')
   document.head.append(el)
 }
 

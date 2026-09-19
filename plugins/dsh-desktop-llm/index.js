@@ -119,6 +119,24 @@ async function serve(ctx, req, res) {
       send(res, 200, await storeCredential(ctx, request))
       return
     }
+    if (method === 'describe-credentials') {
+      const request = JSON.parse(await readBody(req))
+      const credentials = ctx.get('credentials')
+      const refs = Array.isArray(request.refs) ? request.refs.map(String) : []
+      const out = {}
+      for (const ref of refs) {
+        try {
+          const info = await credentials?.describe(ref)
+          // `writable` gates the page's key field; the seam reports it, so it
+          // travels rather than being assumed.
+          out[ref] = { configured: info?.configured === true, writable: info?.writable !== false }
+        } catch {
+          out[ref] = { configured: false, writable: true }
+        }
+      }
+      send(res, 200, { ok: true, credentials: out })
+      return
+    }
     if (method === 'describe') {
       const settings = ctx.get('settings')
       send(res, 200, {
