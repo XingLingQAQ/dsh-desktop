@@ -602,14 +602,21 @@
         value.desktopSetRow = function (entry) {
           if (!isObject(entry) || typeof entry.id !== "string") return;
           if (!this.graphRows) this.graphRows = new Map();
-          // Shape must match BootModuleRow after parseBootManifest: arriveGraphRow
-          // iterates row.external unconditionally, so the field is required ([] when
-          // the bundle has no dynamic package requests — the common desktop case).
+          // Shape must match what the RUNNING client-modules bundle walks, and
+          // that is not the same as what the source tree documents: the
+          // shipped `arriveGraphRow` iterates `row.external` *and then*
+          // `row.inject`, resolving each against the graph. A row without
+          // `inject` throws `row.inject is not iterable` from inside
+          // `prefetch`, which the HMR driver awaits — so a hot swap silently
+          // stops half-way: the graph row updates, the caches clear, and the
+          // fiber is never replaced, with the rejection swallowed by the
+          // driver's queue. Both arrays are therefore always present.
           this.graphRows.set(entry.id, {
             id: entry.id,
             url: entry.url,
             rev: entry.rev,
-            external: Array.isArray(entry.external) ? entry.external.slice() : []
+            external: Array.isArray(entry.external) ? entry.external.slice() : [],
+            inject: Array.isArray(entry.inject) ? entry.inject.slice() : []
           });
         };
       }
