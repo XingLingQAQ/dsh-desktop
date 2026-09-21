@@ -1000,6 +1000,13 @@ impl PluginManager {
     /// entries carry absolute URLs, so the manifest is re-scanned.
     pub fn set_bridge_base(&self, base: String) {
         *self.bridge_base.lock().unwrap() = base;
+        // Publish it for the host half to read. A desktop plugin's client half
+        // is served by this bridge, and the DSH page cannot fetch that origin
+        // with the plain `<script src>` the module system uses — so the host
+        // half re-serves the same bytes on the page's own server and needs to
+        // be told where they are. Written before `scan` so the file exists by
+        // the time a row naming the route can be mounted.
+        self.publish_bridge_base();
         self.scan();
     }
 
@@ -1023,7 +1030,38 @@ impl PluginManager {
         // its host half kept running, so its settings section stayed on the
         // settings rail forever. Re-writing the set here closes that hole.
         self.sync_paused_to_host(&home, &profile);
+        // The bridge may have bound before the home was known, in which case its
+        // publish had nowhere to write. Now that there is a destination, the
+        // host half gets its pointer.
+        self.publish_bridge_base();
         self.scan();
+    }
+
+    /// Write this bridge's base URL where the host half can find it.
+    ///
+    /// A desktop plugin's client bundle lives on this loopback server, but the
+    /// DSH page loads bundles with a plain `<script src>` and this server
+    /// listens on a different port than the page — so the direct URL is
+    /// cross-origin and the script never loads. The host half re-serves those
+    /// bytes from the page's own origin instead, and this file is how it learns
+    /// which loopback address to forward to. A no-op until both the bridge has
+    /// bound and the DSH home is known, since neither the address nor the
+    /// destination exists before then.
+    fn publish_bridge_base(&self) {
+        let base = self.bridge_base.lock().unwrap().clone();
+        if base.is_empty() {
+            return;
+        }
+        let home = match self.backend.lock().unwrap().home.clone() {
+            Some(home) => home,
+            None => return,
+        };
+        let payload = serde_json::json!({ "base": base });
+        let Ok(text) = serde_json::to_string(&payload) else { return };
+        // Best effort: a failure here costs only the same-origin route, and the
+        // next launch writes it again. There is no one to report to on this
+        // path.
+        let _ = fs::write(home.join("desktop-bridge.json"), text);
     }
 
     /// Write a `disabled` override for every paused plugin that owns host rows.

@@ -440,6 +440,100 @@
   patchDom();
   patchAsync();
 
+  // The host groups many bundles into one fetch: `/plugins/??a/client.js,b/…`
+  // lists every member in the query string, and with enough plugins installed
+  // that URL grows to a couple of kilobytes. Chromium refuses any request whose
+  // headers total more than ~2 KB, and its own baseline headers already use
+  // nearly all of that — so the grouped URL comes back 431 Request Header
+  // Fields Too Large and every bundle in the group fails to load. Since the
+  // whole application tier shares one group, one oversized URL takes the entire
+  // plugin system down: the boot page shows "Failed to load plugins" and
+  // nothing mounts.
+  //
+  // The server has no such limit (a direct request of the same URL succeeds),
+  // so the fix is to stop asking for a small library in one URL. A batch is
+  // split into one batch per member, each naming only its own bundle — a
+  // hundred-odd bytes — which is what `mergeBoot` does below for the desktop's
+  // own entries anyway.
+  var MAX_BATCH_URL = 1500;
+
+  function splitBatch(batch, byId) {
+    if (!isObject(batch) || typeof batch.url !== "string") return null;
+    if (batch.url.length <= MAX_BATCH_URL) return null;
+    if (!Array.isArray(batch.entries) || batch.entries.length < 2) return null;
+    var out = [];
+    for (var i = 0; i < batch.entries.length; i++) {
+      var id = batch.entries[i];
+      var row = byId.get(id);
+      // A member without a row of its own cannot be split out safely: there is
+      // no url to name, and dropping it would silently unmount a plugin.
+      if (row === undefined || typeof row.url !== "string") return null;
+      out.push({
+        phase: batch.phase,
+        url: sameOriginUrl(row.url),
+        rev: row.rev,
+        entries: [id]
+      });
+    }
+    return out;
+  }
+
+  // ------------------------------------------------------------ bundle urls
+  // 桌面插件的包由壳自己的 loopback 桥服务，监听的是另一个端口。DSH 页面用
+  // 普通 `<script src>` 加载包，所以那个绝对地址是跨源的，Chromium 会拒绝，
+  // 于是整行报 `bundle script undefined failed to load`，客户端半永远起不来。
+  // 纯桌面插件能活着，是因为它的行会被宿主自己的相对地址重写；而一个同时被
+  // 宿主从 profile 挂载的插件保留绝对形式，恰好就是起不来的那个。
+  //
+  // 所以桌面地址一律改成相对页面自身来源的形式，由宿主半的
+  // `dsh-desktop-bundles` 路由把同样的字节再发一遍。相对地址原样留着：那已经
+  // 是宿主自己的 `/plugins/??…` 形式，同源且可用。
+  var BUNDLE_ROUTE = "/dsh-desktop-bundles";
+
+  function sameOriginUrl(url) {
+    if (typeof url !== "string" || url === "") return url;
+    // 已经是相对地址（宿主自己的 `/plugins/??…` 形式）——不用动。
+    if (url.charAt(0) === "/") return url;
+    var m = /^https?:\/\/[^/]+(\/plugins\/.*)$/.exec(url);
+    if (m === null) return url;
+    // `…/plugins/<id>/client.js?rev=…` → `/dsh-desktop-bundles/plugins/<id>/…`。
+    // query 一并带上，因为桥的缓存与 rev 都以它为准。
+    return BUNDLE_ROUTE + m[1];
+  }
+
+  // 一条 batch 的 url 会把该批每个包的名字列进 query string。插件多到一定程度
+  // 这条 URL 就超过浏览器的请求头总量上限（约 2KB，见 `mergeBoot` 里的说明），
+  // 整批包一起加载失败。超过 `MAX_BATCH_URL` 的分组就拆成每个包一条。
+  var MAX_BATCH_URL = 1500;
+
+  /**
+   * 把一条过大的 batch 拆成每个 entry 一条。
+   * @param {{ url?: string, phase?: string, entries?: string[] }} batch - 原来的分组。
+   * @param {Map<string, { url?: string, rev?: string }>} byId - entry id 到自身行的索引。
+   * @returns {Array<{phase: unknown, url: string, rev: unknown, entries: string[]}> | null}
+   *   拆好的 batch 列表；任何成员缺少自己的行就返回 null，表示不拆。
+   */
+  function splitBatch(batch, byId) {
+    if (!isObject(batch) || typeof batch.url !== "string") return null;
+    if (batch.url.length <= MAX_BATCH_URL) return null;
+    if (!Array.isArray(batch.entries) || batch.entries.length < 2) return null;
+    var out = [];
+    for (var i = 0; i < batch.entries.length; i++) {
+      var id = batch.entries[i];
+      var row = byId.get(id);
+      // 成员没有自己的行就不能安全拆出来：没有地址可写，而丢掉它就等于悄悄
+      // 卸载一个插件。宁可整条不拆，让问题保持在原处。
+      if (row === undefined || typeof row.url !== "string") return null;
+      out.push({
+        phase: batch.phase,
+        url: sameOriginUrl(row.url),
+        rev: row.rev,
+        entries: [id]
+      });
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------------- __DSH_BOOT__
   var bootSlot = undefined;
   Object.defineProperty(window, "__DSH_BOOT__", {
@@ -456,7 +550,20 @@
 
   function mergeBoot(value) {
     if (!isObject(value) || !Array.isArray(value.entries)) return value;
-    var entries = value.entries.slice();
+    // 一个既被 DSH Loader 挂载、又归桌面管的插件，它这行是宿主给的，地址也是
+    // 绝对的——所以要就地重写，而不只是走下面 `added` 那条路。少了这一步，最
+    // 需要同源路由的那个插件恰好拿不到它。
+    var entries = value.entries.map(function (entry) {
+      if (!isObject(entry) || typeof entry.url !== "string") return entry;
+      var rewritten = sameOriginUrl(entry.url);
+      if (rewritten === entry.url) return entry;
+      var copy = {};
+      for (var key in entry) {
+        if (Object.prototype.hasOwnProperty.call(entry, key)) copy[key] = entry[key];
+      }
+      copy.url = rewritten;
+      return copy;
+    });
     var added = [];
     known.forEach(function (entry) {
       if (!entries.some(function (e) { return isObject(e) && e.id === entry.id; })) {
@@ -477,11 +584,47 @@
     // 我们的插件是另外服务的，所以每个自己配一个单条的 batch：
     // url 就是该 entry 自己的 url，rev 也是。
     if (Array.isArray(merged.batches)) {
-      var batches = merged.batches.slice();
+      // 一条 batch 的 url 就是它那批 entry 的取包地址，所以宿主指向桥的
+      // batch 必须跟着它描述的 entry 一起改。
+      //
+      // 更重要的是：宿主会把几十个包塞进一条 URL（`/plugins/??a,b,c…`），
+      // 插件装多了这条 URL 就长到两千多字节。Chromium 对请求头总量有约 2KB
+      // 的硬上限，而它自己的基础头部已经吃掉绝大部分，于是这条 URL 直接被
+      // 431 (Request Header Fields Too Large) 打回，整批包一个都加载不出来。
+      // 宿主服务器本身没有这个限制（同样的 URL 直接请求是通的），所以症结
+      // 是"一条 URL 问一小座库"。这里把过大的一条拆成每个包一条，各自只报
+      // 自己的地址——百来字节，跟下面给桌面插件配单条 batch 是同一个道理。
+      var byId = new Map();
+      entries.forEach(function (entry) {
+        if (isObject(entry) && typeof entry.id === "string") byId.set(entry.id, entry);
+      });
+      var batches = [];
+      merged.batches.forEach(function (batch) {
+        if (!isObject(batch) || typeof batch.url !== "string") {
+          batches.push(batch);
+          return;
+        }
+        var split = splitBatch(batch, byId);
+        if (split !== null) {
+          for (var i = 0; i < split.length; i++) batches.push(split[i]);
+          return;
+        }
+        var rewritten = sameOriginUrl(batch.url);
+        if (rewritten === batch.url) {
+          batches.push(batch);
+          return;
+        }
+        var copy = {};
+        for (var key in batch) {
+          if (Object.prototype.hasOwnProperty.call(batch, key)) copy[key] = batch[key];
+        }
+        copy.url = rewritten;
+        batches.push(copy);
+      });
       added.forEach(function (entry) {
         batches.push({
           phase: "application",
-          url: entry.url,
+          url: sameOriginUrl(entry.url),
           rev: entry.rev,
           entries: [entry.id]
         });
@@ -603,17 +746,27 @@
           if (!isObject(entry) || typeof entry.id !== "string") return;
           if (!this.graphRows) this.graphRows = new Map();
           // Shape must match what the RUNNING client-modules bundle walks, and
-          // that is not the same as what the source tree documents: the
-          // shipped `arriveGraphRow` iterates `row.external` *and then*
-          // `row.inject`, resolving each against the graph. A row without
-          // `inject` throws `row.inject is not iterable` from inside
-          // `prefetch`, which the HMR driver awaits — so a hot swap silently
-          // stops half-way: the graph row updates, the caches clear, and the
-          // fiber is never replaced, with the rejection swallowed by the
-          // driver's queue. Both arrays are therefore always present.
+          // that is not the same as what the source tree documents. Two fields
+          // are load-bearing and neither is obvious:
+          //
+          //  - `arriveGraphRow` iterates `row.external` *and then* `row.inject`,
+          //    resolving each against the graph. A row without `inject` throws
+          //    `row.inject is not iterable` from inside `prefetch`, which the
+          //    HMR driver awaits — so a hot swap silently stops half-way: the
+          //    graph row updates, the caches clear, and the fiber is never
+          //    replaced, with the rejection swallowed by the driver's queue.
+          //  - `arrive` fetches `reloadUrl ?? row.initialUrl`, NOT `row.url`.
+          //    A row published with only `url` therefore loads `undefined` and
+          //    fails with `bundle script undefined failed to load`. The rows
+          //    the host composes carry `initialUrl`, so this only ever breaks
+          //    on rows this proxy publishes — which is every desktop plugin.
+          //
+          // Both arrays and the initial url are therefore always present.
+          var rowUrl = sameOriginUrl(entry.url);
           this.graphRows.set(entry.id, {
             id: entry.id,
-            url: entry.url,
+            url: rowUrl,
+            initialUrl: rowUrl,
             rev: entry.rev,
             external: Array.isArray(entry.external) ? entry.external.slice() : [],
             inject: Array.isArray(entry.inject) ? entry.inject.slice() : []
