@@ -1009,11 +1009,40 @@ impl PluginManager {
     pub fn set_backend_home(&self, home: PathBuf, profile: String) {
         {
             let mut state = self.backend.lock().unwrap();
-            state.home = Some(home);
-            state.profile = profile;
+            state.home = Some(home.clone());
+            state.profile = profile.clone();
             state.last_rev.clear();
         }
+        // Re-apply every pause to the host half before anything else looks at
+        // the tree. A pause is persisted in the desktop's own disabled set, but
+        // its *effect* on the host is a `disabled` override written into the
+        // profile patch — and that write only ever happened on the click that
+        // made the pause. A plugin paused in an earlier session (or by a build
+        // that never got that far) was therefore still mounted by the Loader on
+        // every later boot: its client half stayed out of the boot graph while
+        // its host half kept running, so its settings section stayed on the
+        // settings rail forever. Re-writing the set here closes that hole.
+        self.sync_paused_to_host(&home, &profile);
         self.scan();
+    }
+
+    /// Write a `disabled` override for every paused plugin that owns host rows.
+    ///
+    /// Deliberately one-directional: it pauses, and never resumes. Resuming is
+    /// what the click does, and a plugin whose row the user has since edited by
+    /// hand must not have that edit reverted by a boot-time "consistency" pass —
+    /// only a `true` is ever asserted here, and only for ids the user paused.
+    fn sync_paused_to_host(&self, home: &Path, profile: &str) {
+        let paused: Vec<String> = self.disabled.lock().unwrap().iter().cloned().collect();
+        for id in paused {
+            for entry_id in self.host_entry_ids(&id) {
+                // A failure here is not fatal: the pause is still recorded, the
+                // client half still honours it, and the next toggle re-applies
+                // the host row. Reporting it would only add noise to a startup
+                // path that has no one to read it.
+                let _ = write_native_disable(home, profile, &entry_id, true, Resume::Override);
+            }
+        }
     }
 
     /// The active DSH home directory, when known (set once the DSH host has
