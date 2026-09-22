@@ -131,6 +131,16 @@ function UpdatePopup() {
   // waits to be asked.
   const [downloaded, setDownloaded] = useState<string | null>(null);
   const [harnessOpen, setHarnessOpen] = useState(false);
+  // Bumped every time the shell puts this window back on screen. The window is
+  // built once and merely hidden between opens, so a mount-triggered entrance
+  // animation would only ever play the first time — the key below restarts it by
+  // remounting the animated subtree, which is also why nothing here depends on
+  // mount for anything else.
+  const [showing, setShowing] = useState(0);
+  // A download that just finished needs to say so: the button changes text and
+  // the bar disappears, and without a beat of feedback that reads as "nothing
+  // happened, press again".
+  const [justFetched, setJustFetched] = useState(false);
 
   const close = useCallback(() => {
     void getCurrentWindow().hide();
@@ -208,6 +218,14 @@ function UpdatePopup() {
     };
   }, []);
 
+  // The flash is a beat, not a state: it clears itself once the animation has
+  // had time to land, so nothing downstream has to reset it.
+  useEffect(() => {
+    if (!justFetched) return;
+    const timer = setTimeout(() => setJustFetched(false), 1600);
+    return () => clearTimeout(timer);
+  }, [justFetched]);
+
   // Escape closes, the way a popover should.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -267,6 +285,9 @@ function UpdatePopup() {
   // last time is as old as that look.
   useEffect(() => {
     const un = listen("update-popup-shown", () => {
+      // Restart the entrance: the window is reused, so this is the only moment
+      // that corresponds to "the user just opened it".
+      setShowing((n) => n + 1);
       void loadCached().then(() => refresh(false));
     });
     return () => {
@@ -302,6 +323,9 @@ function UpdatePopup() {
       setDownloaded(next.available ? next.latest : null);
       setProgress(null);
       setBusy(null);
+      // Only a real fetch earns the flash: a check that found nothing is a
+      // non-event and should stay quiet.
+      if (next.available) setJustFetched(true);
     } catch (error) {
       setNotice(String(error));
       setProgress(null);
@@ -382,12 +406,16 @@ function UpdatePopup() {
   return (
     <div className="upd-pop">
       {/* 量这一层的高度来决定窗口多高：外面的 .upd-pop 是滚动容器，高度被
-          窗口约束着，量不出内容本身的自然高度。 */}
+          窗口约束着，量不出内容本身的自然高度。
+          `key` 跟着每次打开变，让入场动画重播——窗口是复用的，不重挂就没有
+          第二次入场。 */}
+      <div className="upd-stage" key={showing}>
       <div className="upd-card" ref={card}>
         <div className="upd-head">
           <strong>DSH Desktop</strong>
-          <span className="upd-version">
-            v{client?.current ?? ""}
+          {/* 版本块：有新版本时整块轻微上浮强调，旧版本弱、新版本强。 */}
+          <span className="upd-version" data-bump={client?.available === true ? "new" : undefined}>
+            <span className="upd-versionOld">v{client?.current ?? ""}</span>
             {client?.available && client.latest && (
               <>
                 <span className="upd-arrow" aria-hidden="true">
@@ -404,21 +432,26 @@ function UpdatePopup() {
           </button>
         </div>
 
-        <p className="upd-status" data-tone={clientTone}>
+        <p className="upd-status" data-tone={clientTone} key={clientStatus}>
           <span className="upd-dot" aria-hidden="true" />
           {clientStatus}
         </p>
 
+        {/* 更新说明：有内容才出现，出现时淡入并展开高度，避免窗口高度硬跳。 */}
         {client?.available && client.notes && (
           <div className="upd-notes">
             {notesToLines(client.notes).map((line, index) => (
-              <p key={index}>{line}</p>
+              <p key={index} style={{ animationDelay: `${Math.min(index, 8) * 24}ms` }}>
+                {line}
+              </p>
             ))}
           </div>
         )}
 
+        {/* 进度条：能算出比例时走实条（宽度带过渡），算不出时走一条来回扫的
+            不确定态——两种都不是"还在转圈"，而是"确实在动"。 */}
         {progress !== null && (
-          <div className="upd-progress">
+          <div className="upd-progress" data-done={justFetched ? "yes" : undefined}>
             <div className="upd-bar">
               <div
                 className="upd-barFill"
@@ -454,6 +487,7 @@ function UpdatePopup() {
               所以按钮一直在（见下面的注释），但字永远只有一个动词。 */}
           <button
             className="upd-button primary"
+            data-done={hasPayload && justFetched ? "yes" : undefined}
             disabled={checking || busy !== null}
             onClick={() => void checkAndDownload()}
           >
@@ -507,6 +541,7 @@ function UpdatePopup() {
             {log.length > 0 && <pre className="upd-log">{log.join("\n")}</pre>}
           </div>
         </details>
+      </div>
       </div>
     </div>
   );
