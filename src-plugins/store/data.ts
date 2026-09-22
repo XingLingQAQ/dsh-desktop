@@ -15,12 +15,6 @@
 const CATALOG_URL =
   'https://raw.githubusercontent.com/XingLingQAQ/dsh-plugin-registry/main/catalog.json'
 
-/** Substituted by the bridge when it serves this bundle. */
-const API_BASE = '__BRIDGE_API__'
-
-const CACHE_KEY = 'dsh-desktop:store:catalog'
-const CACHE_TTL_MS = 6 * 60 * 60 * 1000
-
 export interface CatalogPlugin {
   id: string
   repo: string
@@ -105,7 +99,44 @@ export interface ProfileBundle {
   has_client: boolean
 }
 
-export { CATALOG_URL }
+const CACHE_KEY = 'dsh-desktop:store:catalog'
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000
+
+/**
+ * Where else the same file can be read.
+ *
+ * `raw.githubusercontent.com` is served through a CDN that can hold a stale edge
+ * copy for a given client well past its own TTL: measured on this machine, the
+ * webview kept receiving the previous release for minutes after a push while
+ * `curl` on the same machine already saw the new one, and neither `cache:
+ * 'reload'` nor a unique query string changed that — the staleness is in front of
+ * the HTTP cache, so nothing a fetch can ask for reaches it. The visible effect
+ * is a store that shows a catalog the registry has already replaced, which reads
+ * as "the refresh did nothing".
+ *
+ * jsDelivr serves the same repository path and answered with the current release
+ * in the same test, so it is tried second and its answer is preferred when it is
+ * demonstrably newer. A mirror is only a fallback: if the two agree (the normal
+ * case) the primary's answer is used and nothing else changes.
+ */
+const CATALOG_MIRRORS: readonly string[] = [
+  CATALOG_URL,
+  'https://cdn.jsdelivr.net/gh/XingLingQAQ/dsh-plugin-registry@main/catalog.json',
+]
+
+/** One catalog fetch. Never throws — a mirror that fails just loses. */
+async function tryFetchCatalog(url: string): Promise<Catalog | undefined> {
+  try {
+    const res = await fetch(url, { cache: 'no-store' })
+    if (!res.ok) return undefined
+    const catalog = (await res.json()) as Catalog
+    // Shape check, not a schema: a wrong-looking body (an HTML error page that
+    // still answered 200) must not win a race against a good one.
+    return Array.isArray(catalog?.plugins) ? catalog : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * Read the catalog, preferring a recent session-cached copy.
@@ -123,9 +154,13 @@ export async function readCatalog(force: boolean): Promise<Catalog> {
       }
     }
   }
-  const res = await fetch(CATALOG_URL, { cache: force ? 'reload' : 'default' })
-  if (!res.ok) throw new Error(`目录获取失败：HTTP ${String(res.status)}`)
-  const catalog = (await res.json()) as Catalog
+  const answers = await Promise.all(CATALOG_MIRRORS.map(url => tryFetchCatalog(url)))
+  const found = answers.filter((c): c is Catalog => c !== undefined)
+  if (found.length === 0) throw new Error('目录获取失败：所有镜像都无法访问')
+  // Newest wins, so a stale edge loses to a fresh mirror; ties keep the primary,
+  // which is what makes the common case byte-identical to before.
+  const catalog = found.reduce((best, next) =>
+    Date.parse(next.generatedAt) > Date.parse(best.generatedAt) ? next : best)
   try {
     sessionStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), catalog }))
   } catch {
@@ -133,6 +168,12 @@ export async function readCatalog(force: boolean): Promise<Catalog> {
   }
   return catalog
 }
+
+
+/** Substituted by the bridge when it serves this bundle. */
+const API_BASE = '__BRIDGE_API__'
+
+export { CATALOG_URL }
 
 /** What is currently on disk under the desktop plugins directory. */
 export async function readInstalled(): Promise<Installed[]> {
