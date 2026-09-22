@@ -22,13 +22,13 @@
   gap: 4px;
   padding: 2px;
   border-radius: 8px;
-  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.08));
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.08));
 }
 
 .dsx-store-filter {
   border: none;
   background: transparent;
-  color: var(--dsw-alias-text-secondary, #6b7280);
+  color: var(--dsw-alias-label-secondary, #6b7280);
   font: inherit;
   font-size: 12px;
   padding: 4px 10px;
@@ -37,12 +37,12 @@
 }
 
 .dsx-store-filter:hover {
-  color: var(--dsw-alias-text-primary, #111827);
+  color: var(--dsw-alias-label-primary, #111827);
 }
 
 .dsx-store-filter[data-active='true'] {
-  background: var(--dsw-alias-bg-primary, #fff);
-  color: var(--dsw-alias-text-primary, #111827);
+  background: var(--dsw-alias-bg-layer-1, #fff);
+  color: var(--dsw-alias-label-primary, #111827);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
@@ -56,7 +56,7 @@
 
 .dsx-store-meta {
   font-size: 11.5px;
-  color: var(--dsw-alias-text-tertiary, #9ca3af);
+  color: var(--dsw-alias-label-tertiary, #9ca3af);
   display: flex;
   gap: 8px;
   align-items: center;
@@ -75,9 +75,9 @@
   align-items: flex-start;
   gap: 12px;
   padding: 12px;
-  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.2));
   border-radius: 10px;
-  background: var(--dsw-alias-bg-primary, transparent);
+  background: var(--dsw-alias-bg-layer-1, transparent);
   /* Hover feedback belongs to the whole card, not the inner body: a tinted
      rectangle inside the card read as a misaligned patch (square corners,
      inset from the card edge). Shadow magnitude follows DSH's own plugin
@@ -90,8 +90,8 @@
 }
 
 .dsx-store-card:hover {
-  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.06));
-  border-color: var(--dsw-alias-border-primary, rgba(127, 127, 127, 0.35));
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.06));
+  border-color: var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.35));
   box-shadow:
     0 4px 12px rgba(0, 0, 0, 0.02),
     0 2px 8px rgba(0, 0, 0, 0.04);
@@ -109,7 +109,7 @@
 }
 
 .dsx-store-card-body:focus-visible {
-  outline: 2px solid var(--dsw-alias-text-secondary, #6b7280);
+  outline: 2px solid var(--dsw-alias-label-secondary, #6b7280);
   outline-offset: 2px;
 }
 
@@ -123,14 +123,14 @@
 .dsx-store-name {
   font-size: 13px;
   font-weight: 600;
-  color: var(--dsw-alias-text-primary, #111827);
+  color: var(--dsw-alias-label-primary, #111827);
   overflow-wrap: anywhere;
 }
 
 .dsx-store-desc {
   font-size: 12px;
   line-height: 1.5;
-  color: var(--dsw-alias-text-secondary, #6b7280);
+  color: var(--dsw-alias-label-secondary, #6b7280);
   overflow-wrap: anywhere;
 }
 
@@ -139,7 +139,7 @@
   gap: 10px;
   flex-wrap: wrap;
   font-size: 11px;
-  color: var(--dsw-alias-text-tertiary, #9ca3af);
+  color: var(--dsw-alias-label-tertiary, #9ca3af);
 }
 
 .dsx-store-repo {
@@ -163,7 +163,7 @@
   padding: 28px 12px;
   text-align: center;
   font-size: 12.5px;
-  color: var(--dsw-alias-text-tertiary, #9ca3af);
+  color: var(--dsw-alias-label-tertiary, #9ca3af);
 }
 
 /* Animated error rows collapse via height animation; keep their text padding
@@ -205,7 +205,7 @@
 }
 
 .dsx-store-error {
-  color: var(--dsw-alias-text-danger, #dc2626);
+  color: var(--dsw-alias-state-error-primary, #dc2626);
 }
 
 .dsx-store-detail {
@@ -224,9 +224,9 @@
 }
 
 .dsx-store-back {
-  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.2));
   background: transparent;
-  color: var(--dsw-alias-text-secondary, #6b7280);
+  color: var(--dsw-alias-label-secondary, #6b7280);
   font: inherit;
   font-size: 12px;
   padding: 4px 10px;
@@ -235,13 +235,13 @@
 }
 
 .dsx-store-back:hover {
-  color: var(--dsw-alias-text-primary, #111827);
-  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.06));
+  color: var(--dsw-alias-label-primary, #111827);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.06));
 }
 
 .dsx-store-detail-readme {
   padding-top: 12px;
-  border-top: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.2));
   margin-top: 4px;
 }
 
@@ -328,7 +328,7 @@
 .dsx-store-readme-content :where(p, h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre, table) {
   font-size: 13px;
   line-height: 1.6;
-  color: var(--dsw-alias-text-primary, #111827);
+  color: var(--dsw-alias-label-primary, #111827);
 }
 
 /* Headings scale down to the pane; GitHub READMEs lean on h1/h2 as section
@@ -339,7 +339,7 @@
   font-weight: 600;
   margin: 18px 0 8px;
   padding-bottom: 4px;
-  border-bottom: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.2));
 }
 
 .dsx-store-readme-content h3,
@@ -363,17 +363,17 @@
 /* Inline + fenced code. GitHub READMEs use fenced code for install snippets; a
    tinted block with wrapping keeps long lines readable in a narrow pane. */
 .dsx-store-readme-content code {
-  font-family: var(--dsw-alias-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-family: var(--dsw-font-markdown-code-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12.5px;
   padding: 1px 5px;
   border-radius: 5px;
-  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.1));
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.1));
 }
 
 .dsx-store-readme-content pre {
   padding: 10px 12px;
   border-radius: 8px;
-  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.1));
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.1));
   overflow-x: auto;
 }
 
@@ -395,27 +395,27 @@
 
 .dsx-store-readme-content th,
 .dsx-store-readme-content td {
-  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.2));
   padding: 5px 10px;
   text-align: left;
 }
 
 .dsx-store-readme-content th {
-  background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.08));
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.08));
   font-weight: 600;
 }
 
 /* Blockquote: a left rule + muted text, the GitHub README callout look. */
 .dsx-store-readme-content blockquote {
   padding: 4px 12px;
-  border-left: 3px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.3));
-  color: var(--dsw-alias-text-secondary, #6b7280);
+  border-left: 3px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.3));
+  color: var(--dsw-alias-label-secondary, #6b7280);
 }
 
 /* Links pick up the app accent; the sanitizer's afterSanitizeAttributes hook
    already set target/rel on external ones. */
 .dsx-store-readme-content a {
-  color: var(--dsw-alias-color-accent, #2563eb);
+  color: var(--dsw-alias-brand-primary, #2563eb);
   text-decoration: none;
 }
 
@@ -432,7 +432,7 @@
 /* <details> blocks (collapsible README sections) read as a subtle card. */
 .dsx-store-readme-content details {
   padding: 8px 12px;
-  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.2));
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.2));
   border-radius: 8px;
   margin: 8px 0;
 }
@@ -446,7 +446,12 @@
    Shared by the store and manager tabs. The bar is indeterminate on purpose:
    the bridge answers an install with one response at the end, so there is no
    percentage to honour — the sweep says "still working" without inventing a
-   number. */
+   number.
+
+   It is also indeterminate in practice even when bytes are known: a download is
+   bracketed by「正在准备下载…」and「正在解压…」, and both of those phases report no
+   bytes at all. So this bar spends real time in each of its two shapes and both
+   have to read as "working". */
 .dsx-task {
   display: flex;
   flex-direction: column;
@@ -457,7 +462,7 @@
 .dsx-task-bar {
   position: relative;
   overflow: hidden;
-  height: 4px;
+  height: 6px;
   border-radius: 999px;
   /* `interactive-bg-hover` is one of the alias tokens this theme really defines
      (a faint wash on both light and dark), which the `fill-*` family is not. */
@@ -473,7 +478,7 @@
   width: 38%;
   border-radius: 999px;
   background: var(--dsw-alias-brand-primary, #4d6bfe);
-  opacity: 0.35;
+  opacity: 0.55;
   animation: dsx-task-sweep 1.15s ease-in-out infinite;
 }
 
@@ -485,18 +490,74 @@
   transition: width 0.2s ease-out;
 }
 
+/* A sheen riding the filled part of a determinate bar. The sweep above is what
+   says "working" when there is no value; once there is one, the value is what
+   moves — but a download can stall for seconds between chunks on a slow host,
+   and a frozen bar with a correct number on it reads as a hang. Slow and faint
+   on purpose: it is a pulse, not a second progress bar. */
+.dsx-task-bar-fill.is-determinate::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--dsw-alias-bg-base, #fff) 45%, transparent) 50%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: dsx-task-sheen 1.8s ease-in-out infinite;
+}
+
 @keyframes dsx-task-sweep {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(263%); }
 }
 
+@keyframes dsx-task-sheen {
+  to { transform: translateX(100%); }
+}
+
+/* A soft breathing glow behind the dialog's bar while work is in flight. The
+   dialog is modal and blocks the page, so the only feedback available is what is
+   inside it; this makes the card itself read as "occupied" rather than merely
+   open. */
+.dsx-task-bar::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: inherit;
+  background: var(--dsw-alias-brand-primary, #4d6bfe);
+  opacity: 0;
+  filter: blur(6px);
+  animation: dsx-task-glow 2.2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes dsx-task-glow {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 0.18; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  /* An indeterminate bar carries no value, so with motion suppressed there is
-     nothing honest left to draw — leave the track empty and let the step label
-     and the elapsed clock carry "still working". Anything else here becomes a
-     static slab that either lies about progress or just looks like a black bar. */
+  /* Motion is suppressed, so the moving parts are replaced by their meaning
+     rather than removed:
+       - an indeterminate bar cannot show a value, so it becomes a full-width
+         faint track. Hiding it (which is what used to happen) left an empty
+         rail that says nothing at all, and since this machine reports `reduce`,
+         that empty rail was what every install actually looked like.
+       - a determinate bar keeps its width, and the sheen and glow go. */
   .dsx-task-bar-fill:not(.is-determinate) {
-    display: none;
+    width: 100%;
+    opacity: 0.3;
+    animation: none;
+    transform: none;
+  }
+  .dsx-task-bar-fill.is-determinate::after,
+  .dsx-task-bar::before {
+    content: none;
+    animation: none;
   }
 }
 
@@ -509,15 +570,44 @@
   color: var(--dsw-alias-label-secondary);
 }
 
+/* The left half changes phase (准备 → 下载 → 解压), often several times in one
+   download. Cross-fading it is the difference between "it is moving through
+   stages" and "the text is flickering". Keyed on the label in TaskDialog so a
+   change restarts it. */
+.dsx-task-phase {
+  animation: dsx-task-fade 0.28s ease both;
+}
+
+@keyframes dsx-task-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .dsx-task-elapsed {
+  flex: none;
   font-variant-numeric: tabular-nums;
   color: var(--dsw-alias-label-tertiary);
 }
 
+/* The error half. It replaces the bar in place, so it arrives rather than
+   substituting: a modal that silently changes shape is easy to read as "it
+   finished". */
 .dsx-task-error {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  animation: dsx-task-error-in 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes dsx-task-error-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .dsx-task-error-head {
@@ -525,17 +615,32 @@
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: var(--dsw-alias-label-secondary);
+  color: var(--dsw-alias-state-error-primary, var(--dsw-alias-label-secondary));
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .dsx-task-phase,
+  .dsx-task-error {
+    animation-name: dsx-task-fade;
+  }
+  .dsx-task-error {
+    transform: none;
+  }
+}
+
+/* The verbatim bridge message. Only tokens this theme really reports are named
+   here: `fill-*` and `border-secondary` are DSH words the desktop never
+   receives, so leaning on them means silently falling back to a hardcoded grey
+   that ignores the user's theme. `bg-secondary`/`interactive-bg-hover` and
+   `label-tertiary` are all in the reported set. */
 .dsx-task-error-detail {
   margin: 0;
   max-height: 180px;
   overflow: auto;
-  padding: 8px 10px;
-  border: 1px solid var(--dsw-alias-border-secondary, rgba(127, 127, 127, 0.24));
+  padding: 9px 11px;
+  border: 1px solid var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.24));
   border-radius: 8px;
-  background: var(--dsw-alias-fill-quaternary, rgba(127, 127, 127, 0.08));
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.08));
   font-family: var(--dsw-font-mono, ui-monospace, monospace);
   font-size: 12px;
   line-height: 1.5;
@@ -543,4 +648,5 @@
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
+  scrollbar-width: thin;
 }

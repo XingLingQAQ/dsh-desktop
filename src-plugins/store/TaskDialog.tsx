@@ -193,7 +193,12 @@ function TaskView({ title, step, description, progressId, run, onSettled }: Task
               />
             </div>
             <div className="dsx-task-step">
-              <span>{bridgeLabel ?? label}</span>
+              {/* Keyed on the label so a phase change restarts the fade: the
+                  left half goes 准备 → 下载 → 解压 inside one download, and hard
+                  replacement there reads as a flicker. */}
+              <span className="dsx-task-phase" key={bridgeLabel ?? label}>
+                {bridgeLabel ?? label}
+              </span>
               <span className="dsx-task-elapsed">
                 {percent === undefined
                   ? (elapsed >= 3 ? `${String(elapsed)}s` : '')
