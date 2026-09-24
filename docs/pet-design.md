@@ -101,40 +101,105 @@
 
 ---
 
-## 5. 对话能力怎么接 —— **已查实，可行**
+## 5. 对话能力怎么接 —— **已实测通过**
 
-宠物要和会话说话，就得有**发消息**和**读消息**的能力。三条路，我查了源码：
+这一节原来列了三条待验项。现在三条**全部在运行中的宿主里实测过**了，不是在源码里读出来的。
 
-| 方案 | 结论 |
-|---|---|
-| **A. 走宿主服务** | ✅ **可行**。宿主真实暴露 `sessions`、`agents`、`agentDefaultModel` 服务（`packages/core/agent-loop`、`packages/bundle/headless` 都在用） |
-| B. 注入主窗口页面代发 | ❌ **不可行**。主窗口关掉时页面就没了——和"主窗口关闭时使用"直接冲突 |
-| C. 用 DSH 的 HTTP API | ⚠️ 有 `/api/sessions.*`，但要 token，且不保证稳定。留作退路 |
+做法：临时加了一个宿主半插件 `plugins/dsh-desktop-probe`（只读探测 + 一个可控的发送路由），
+让它在真实的 DSH 宿主里回答。**这个插件已删除**，结论留在下面。
 
-**A 具体能做什么**（读的是 `packages/bundle/headless` 的真实用法）：
+### 5.1 列出会话 —— 可以
+
+| 来源 | 调用 | 实测结果 |
+|---|---|---|
+| **活着的**（本进程内） | `ctx.get('agents').list()` / `.get(id)` / `.roots()` | 存在，方法齐全 |
+| **活着的** | `ctx.get('sessions').list()` / `.get(id)` | 存在 |
+| **落盘的**（含冷会话） | `ctx.get('sessionQuery').listSessions()` | **返回 23 条**历史会话，形状 `{ header, live, persisted }` |
+
+**一个坑**：`sessionQuery` 的搜索是**被配置关掉的**——实测报
+`session search is disabled: this deployment configures the session-query index with openAt "never"`。
+所以「列出会话」能用，「搜索会话」不能用。
+
+### 5.2 往已有会话发消息 —— 可以
+
+**用 `sessionController`，不要用 `agents.followup`。** 这是这次最重要的一个结论：
 
 ```js
-const agents   = ctx.get('agents')            // 创建/管理 agent
-const sessions = ctx.get('sessions')          // 持久化、flush
+const sc = ctx.get('sessionController')
 
-const { agent } = await agents.create({ sessionId, meta, agentOptions, setup })
+// 建会话（本身也是幂等的 create-or-adopt）
+const { sessionId } = await sc.create({ cwd?, sessionId?, agentPreset? })
+// → { sessionId: "session-<uuid>", agentPreset: "standard" }
 
-agent.followup(createUserMessage({ content: [...], source: { kind: 'user' } }))  // ← 发消息
-await agent.whenIdle()                                                          // ← 等回合结束
-agent.session.events                                                            // ← 读事件流
-agent.session.seq                                                               // ← 读位置
+// 发消息 —— 宠物要的就是这一句
+await sc.prompt({
+  requestId: <客户端生成的唯一 id>,
+  sessionId,
+  mode: 'queue' | 'steer',
+  content: [{ type: 'text', text: '...' }],
+}, signal)
+// → { accepted: true }
 ```
 
-所以**发消息、等回合、读事件**三件事都有官方接口，不需要啃私有 API。
+**为什么不用底层的 `agents.get(id).followup(...)`**：`sessionController.create` 本身是
+**create-or-adopt**（活着就直接返回那个 agent、落盘的走 `resume`、都没有才新建），
+而且它带一道**子 agent 归属围栏**，`AgentRegistry` 自己没有。走控制器既少写代码，又是
+Web UI 已经在走的那条路。
 
-**但有一个必须先验的前提**：上面这段来自 **headless bundle**（一个"自己造 agent 干活"的 CLI 场景）。宠物要的是**接入已经在跑的那个会话**，而不是新建一个。这两者用到的接口**不一定相同**——需要确认：
-1. 能不能列出**当前已存在的**会话/agent（`sessions.list` 在客户端那侧见过，宿主侧名字待查）
-2. 能不能往一个**已存在的**会话里 `followup`
-3. 能不能订阅它的**回合结束事件**（不是轮询）
+**实测**：`create` 返回 `session-c1b73094-…` + `agentPreset: "standard"`，
+`prompt` 返回 `{ accepted: true }`；随后 `liveSessions` / `liveAgents` 都变成 1，
+`agents.get(sessionId)` 拿到真实的 Agent 对象。
 
-> 这三条我建议**开工前用一个最小宿主插件实测**（半天），比读源码可靠——上次做渠道页就是因为"文档有、真实 build 没有"栽过一次（客户端 `connection` 的 `api` 成员被删了）。
+**`requestId` 是必需的**：它是「持久化在那条被接受的消息上的客户端 id」，inbox 拿 `id`
+做唯一性键，重复会抛。文档示例里漏了它。要自己造就用 `crypto.randomUUID()`；更稳的是用
+平台自己的 `createUserMessage` —— 实测**可以**从插件里够到（`file:///` 路径下裸
+`@deepseek-ai/*` import 解析不了，要走 `createRequire` + 路径列表，`dsh-desktop-mcp`
+里已有这个写法），它自己会生成 `id`。
 
-**在验完之前**：宠物只做 §4.1（陪伴）+ §4.4（快捷操作），那部分是纯壳内的、一定能做。
+### 5.3 观察回合结束 —— 可以，但 `turn/end` **不等于**「成功」
+
+```js
+ctx.on('session/event', (session, event) => { ... })
+```
+
+实测一次真实回合收到的（共 33 条 `session/event`）：
+
+```
+turn/start(seq 4) → step/start → system/message → user/message → request/header
+→ session/title(13) → assistant/attempt → step/end(31) → turn/end(32)
+```
+
+事件名是 `event.type`，**不是** `event.kind`（whale-girl 的注释里记着这个坑：
+历史上把 kind 当 type 用，导致 turn 边沿永不匹配）。信封是 `{ type, seq, time, data }`。
+
+**关键**：这次 `turn/end` 的 `reason.kind` 是 **`error`**，`reason.error.code` 是 **`SERVER`**
+（这台环境连不上模型，重试 7 次后失败）。
+
+所以 `turn/end` **只说明回合结束了，不说明它成功了**。whale-girl 把「非 blocked 的
+`turn/end`」一律当成 `done`——照抄的话，**失败的回合会让宠物庆祝**。第 2 期必须按
+`reason.kind` 分支：
+
+| `reason.kind` | 宠物该有的反应 |
+|---|---|
+| `completed` | 完成（庆祝） |
+| `error` | 出错（`reason.error.code` 给错误码） |
+| `blocked` | 等待批准（waiting） |
+| `aborted` / `interrupted` | 被打断 |
+| `max-tokens` | 被截断 |
+
+**另外三个可用信号**（都实测到了）：
+
+| 事件 | 载荷 | 用途 |
+|---|---|---|
+| `agent/status` | `{ agent, status: 'idle' \| 'running' }` | 不用轮询的「忙/闲」 |
+| `agent/assistant-stream` | `{ agent, frame }`，`frame.type` 是 `start`/`chunk`/`end` | **逐字流式**，气泡里能边想边显示 |
+| `agent/turn-stopping` | `{ agent, turn, signal }`（serial，回合边界提交前 await） | 想在收尾时插一句 |
+
+从普通插件上下文注册的监听是**未打标签**的，会收到**所有**会话的事件，不用挨个订阅。
+
+**没验的**：这台环境连不上模型，所以只观察到 `error` 结尾的回合，**没观察到一次
+`completed` 的回合**。上表里除 `error` 外的分支是按 `TurnEndReason` 类型写的，不是实测的。
+
 
 ---
 
@@ -189,10 +254,14 @@ agent.session.seq                                                               
 | 期 | 内容 | 状态 |
 |---|---|---|
 | **1** | 壳 + 窗口 + 位置记忆 + 待机动画 + 右键菜单 | ✅ **已完成**（见 §11） |
+| **0** | 验 §5 那三条（能不能列会话 / 发消息 / 订阅回合） | ✅ **已实测通过**（见 §5） |
 | **2** | 气泡 + 状态反映（思考中/完成/出错） | 未开始 |
-| **3** | 宿主半插件 + 发消息 + 会话切换 | 未开始（先验 §5 的三条） |
+| **3** | 宿主半插件 + 发消息 + 会话切换 | 未开始（§5 已验，地基已确认） |
 | **4** | 文件接住 + 队列 + 喂给会话 | 未开始 |
 | **5** | 投喂/养成（可选） | 未开始 |
+
+第 2 期原本排在验 §5 之前，现在两条都通了。**先做第 2 期**：它只依赖壳内的
+`ctx.on('session/event')`，是已经实测过的那条路，而且做出来立刻能看效果。
 
 ---
 
