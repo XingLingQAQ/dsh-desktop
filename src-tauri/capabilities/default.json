@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Shell windows: titlebar controls, drag region, events",
-  "windows": ["main", "splash", "tray-menu", "update-popup"],
+  "description": "Shell windows: titlebar controls, drag region, events. The pet is listed for the same reason the others are: it drags itself with the window manager and listens for theme changes, and both of those are core-plugin commands that a window without a capability is refused.",
+  "windows": ["main", "splash", "tray-menu", "update-popup", "pet"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",

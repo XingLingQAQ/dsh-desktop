@@ -28,6 +28,7 @@ export default defineConfig({
         splash: resolve(__dirname, "splash.html"),
         trayMenu: resolve(__dirname, "tray-menu.html"),
         updatePopup: resolve(__dirname, "update-popup.html"),
+        pet: resolve(__dirname, "pet.html"),
       },
     },
   },

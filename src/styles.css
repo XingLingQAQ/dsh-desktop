@@ -1756,3 +1756,375 @@ html.upd-window body {
     animation-name: upd-fade-in;
   }
 }
+
+/* ============ 桌面宠物 ============
+ *
+ * 独立窗口（pet.html / src/pet.tsx），透明、置顶、无边框、跳过任务栏。
+ *
+ * 这个窗口**必须透明**：宠物的"形状"就是它自己的像素，窗口矩形里除了宠物
+ * 以外的部分要真的透出桌面。这一点是实测过的（不是照抄更新弹窗——那个用
+ * SetWindowRgn 裁圆角，方式不同）。
+ *
+ * 背景色的默认值是 DSH 浅色主题的真实色值，深色主题由注入脚本上报覆盖，和
+ * 其它窗口走同一套 --ds-* 变量。
+ */
+html.pet-window,
+html.pet-window body {
+  background: transparent;
+  overflow: hidden;
+}
+
+.pet-root {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  /* 整层透明：只有宠物本体画东西。 */
+  background: transparent;
+
+  /* 宠物**自己的调色板**，不跟主题走。
+   *
+   * 一开始这里用的是 --ds-brand，想法是"宠物跟着应用主题变色"。实测发现那是错
+   * 的：DSH 的 brand-primary 是**主按钮**的颜色，深色主题下是近黑、浅色主题下
+   * 是近白。而宠物住在桌面上，不是住在应用里——一只白色的宠物落在浅色壁纸上
+   * 就是隐形的。所以宠物用固定的角色配色，再靠下面那圈描边跟任意壁纸分开。 */
+  --pet-hi: #7c93ff;
+  --pet-body: #4e68f0;
+  --pet-lo: #3a4fd0;
+  --pet-belly: #93a6ff;
+  --pet-ink: #ffffff;
+}
+
+/* 拖动句柄 = 宠物本体。cursor 用 move 而不是 grab：这是一只可以被拎走的宠物，
+   不是一块可拖动的面板。
+
+   本体铺满窗口，而不是居中留白：透明区域**依然会吃掉鼠标点击**（这个窗口不做
+   点击穿透），所以窗口每多留一圈空白，桌面上就多一块点不动的地方。窗口尺寸因
+   此按"宠物本身 + 跳跃所需的高度"来定，见 pet.rs 的 PET_WIDTH/PET_HEIGHT。 */
+.pet-body {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  cursor: move;
+  /* 拖动由 OS 接管（startDragging），所以这里不要 select / 不要原生拖拽。 */
+  user-select: none;
+  -webkit-user-drag: none;
+  outline: none;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  /* 给脚下的柔光留几像素。不留的话那圈投影正好被窗口下沿切掉，宠物看着像贴在
+     一条硬边上，而不是站在桌面上。 */
+  padding-bottom: 8px;
+}
+
+.pet-body:focus-visible {
+  /* 键盘走到宠物上时给个提示，但不画方框——透明窗口里一个矩形边框很出戏。
+     用宠物自己的亮色而不是主题品牌色：深色主题下品牌色是近黑的，那样这圈提示
+     等于不存在。 */
+  filter: drop-shadow(0 0 6px var(--pet-hi));
+}
+
+/* ── 本体 ────────────────────────────────────────────────────────────── */
+
+.pet-figure {
+  position: relative;
+  width: 108px;
+  height: 132px;
+  /* 常驻的呼吸：极慢、极小幅，静止的宠物看着像贴图而不是活的。 */
+  animation: pet-breathe 3.2s ease-in-out infinite;
+  transform-origin: 50% 100%;
+  /* 一圈浅色晕 + 一层深色投影。两层是必要的：浅色晕让宠物在深色壁纸上不糊成
+     一团，深色投影让它在浅色壁纸上不飘。只用其中一层，总有一种桌面会翻车。 */
+  filter: drop-shadow(0 0 1.5px rgba(255, 255, 255, 0.45))
+    drop-shadow(0 3px 5px rgba(0, 0, 0, 0.35));
+}
+
+@keyframes pet-breathe {
+  0%,
+  100% {
+    transform: translateY(0) scaleY(1);
+  }
+  50% {
+    transform: translateY(-2px) scaleY(1.015);
+  }
+}
+
+.pet-head {
+  position: absolute;
+  left: 6px;
+  top: 14px;
+  width: 96px;
+  height: 88px;
+  border-radius: 48px 48px 42px 42px;
+  /* 上浅下深，让圆球有体积而不是一块平色。 */
+  background: linear-gradient(165deg, var(--pet-hi) 0%, var(--pet-body) 52%, var(--pet-lo) 100%);
+  /* 一点内高光，让头部不是一块死色。 */
+  box-shadow:
+    inset 0 6px 10px -6px rgba(255, 255, 255, 0.35),
+    inset 0 -8px 14px -8px rgba(0, 0, 0, 0.35);
+}
+
+/* 耳朵：两个旋转的圆角方块，比三角形更"软"。 */
+.pet-ear {
+  position: absolute;
+  top: 4px;
+  width: 26px;
+  height: 30px;
+  border-radius: 8px 14px 6px 14px;
+  background: var(--pet-body);
+  transform-origin: 50% 100%;
+}
+
+/* 耳廓：没有它，耳朵和头同色，远看只是脑袋上鼓了两个包。 */
+.pet-ear::after {
+  content: '';
+  position: absolute;
+  inset: 6px 7px 8px 6px;
+  border-radius: 6px 10px 4px 10px;
+  background: var(--pet-lo);
+  opacity: 0.55;
+}
+
+.pet-ear-left {
+  left: 14px;
+  transform: rotate(-18deg);
+  animation: pet-ear-twitch-left 5.4s ease-in-out infinite;
+}
+
+.pet-ear-right {
+  right: 14px;
+  transform: rotate(18deg) scaleX(-1);
+  animation: pet-ear-twitch-right 6.1s ease-in-out infinite;
+}
+
+/* 耳朵各自不同步地抖一下：两只同时动像机械，错开才像活物。 */
+@keyframes pet-ear-twitch-left {
+  0%,
+  88%,
+  100% {
+    transform: rotate(-18deg);
+  }
+  92% {
+    transform: rotate(-26deg);
+  }
+}
+
+@keyframes pet-ear-twitch-right {
+  0%,
+  84%,
+  100% {
+    transform: rotate(18deg) scaleX(-1);
+  }
+  89% {
+    transform: rotate(26deg) scaleX(-1);
+  }
+}
+
+/* 眼睛：上下用 scaleY 压扁来眨眼。比切图轻，也比改高度不触发布局。 */
+.pet-eye {
+  position: absolute;
+  top: 36px;
+  width: 12px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--pet-ink);
+  transform-origin: 50% 50%;
+  animation: pet-blink 4.6s ease-in-out infinite;
+}
+
+.pet-eye-left {
+  left: 22px;
+}
+
+.pet-eye-right {
+  right: 22px;
+  /* 错开半拍，避免"两边一起眨"的塑料感。 */
+  animation-delay: 0.12s;
+}
+
+@keyframes pet-blink {
+  0%,
+  92%,
+  100% {
+    transform: scaleY(1);
+  }
+  95% {
+    transform: scaleY(0.08);
+  }
+}
+
+/* 腮红是**角色的一部分**，不是界面状态，所以这里用一个固定的暖粉色而不是主题
+   变量。之前写的是 --ds-danger——那个变量根本不存在（真名是 --ds-error），于是
+   一直静默回退成写死的正红；而且就算名字对了也不该用"错误色"当腮红。 */
+.pet-cheek {
+  position: absolute;
+  top: 54px;
+  width: 14px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgb(255, 138, 150);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.pet-cheek-left {
+  left: 12px;
+}
+
+.pet-cheek-right {
+  right: 12px;
+}
+
+.pet-mouth {
+  position: absolute;
+  left: 50%;
+  top: 54px;
+  width: 12px;
+  height: 7px;
+  margin-left: -6px;
+  border-radius: 0 0 8px 8px;
+  border-bottom: 2px solid var(--pet-ink);
+  border-left: 2px solid transparent;
+  border-right: 2px solid transparent;
+  opacity: 0.55;
+  transition: opacity 0.2s ease, height 0.2s ease;
+}
+
+/* 肚子：比头略窄、坐在头下面，形成一个可以"墩"一下的身体。颜色要比头**明显**
+   浅一档——同色时头和肚子在剪影里粘成一个球，看不出是只动物。 */
+.pet-belly {
+  position: absolute;
+  left: 20px;
+  bottom: 0;
+  width: 68px;
+  height: 52px;
+  border-radius: 30px 30px 26px 26px;
+  background: linear-gradient(180deg, var(--pet-belly) 0%, var(--pet-hi) 100%);
+  /* 上沿压一层内阴影：没有它，浅色的肚子和深色的头在交界处是硬碰硬，看着像系
+     了块围兜；有了这层遮挡，才像头搁在身子上。 */
+  box-shadow:
+    inset 0 9px 12px -9px rgba(0, 0, 0, 0.5),
+    inset 0 -6px 12px -8px rgba(0, 0, 0, 0.4);
+}
+
+.pet-shadow {
+  position: absolute;
+  bottom: 0;
+  width: 84px;
+  height: 12px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.22);
+  filter: blur(4px);
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+/* ── 被摸时的反应 ────────────────────────────────────────────────────── */
+
+/* 开心：整只弹一下，腮红和笑嘴出现。 */
+.pet-root[data-mood='happy'] .pet-figure {
+  animation: pet-hop 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes pet-hop {
+  0% {
+    transform: translateY(0) scale(1);
+  }
+  35% {
+    transform: translateY(-10px) scale(1.04, 0.96);
+  }
+  70% {
+    transform: translateY(0) scale(0.98, 1.02);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+.pet-root[data-mood='happy'] .pet-cheek {
+  opacity: 0.55;
+}
+
+.pet-root[data-mood='happy'] .pet-mouth {
+  opacity: 1;
+  height: 10px;
+}
+
+/* 跳起来时影子缩小，这是"离地"最省的一句话。 */
+.pet-root[data-mood='happy'] .pet-shadow {
+  transform: scale(0.82);
+  opacity: 0.6;
+}
+
+/* 三颗小星星，只在开心的那一瞬存在。 */
+.pet-sparkle {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.pet-root[data-mood='happy'] .pet-sparkle {
+  opacity: 1;
+}
+
+.pet-sparkle span {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  /* 同样是角色色：星星就该是暖金色，不该跟着主题的"警告色"变红或变紫。 */
+  background: rgb(255, 200, 84);
+  animation: pet-sparkle 0.75s ease-out both;
+}
+
+.pet-sparkle span:nth-child(1) {
+  left: 16px;
+  top: 48px;
+}
+
+.pet-sparkle span:nth-child(2) {
+  right: 18px;
+  top: 38px;
+  animation-delay: 70ms;
+}
+
+.pet-sparkle span:nth-child(3) {
+  right: 34px;
+  top: 70px;
+  animation-delay: 140ms;
+}
+
+@keyframes pet-sparkle {
+  0% {
+    opacity: 0;
+    transform: translateY(0) scale(0.4);
+  }
+  35% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-18px) scale(1);
+  }
+}
+
+/* ── 减弱动效 ────────────────────────────────────────────────────────
+ *
+ * 这里和别处不同：宠物的**存在方式**就是动。全关掉之后它是一张图，不再是
+ * 宠物。所以取舍是——把所有"循环、持续"的动作（呼吸、眨眼、耳朵抖）停掉，
+ * 只保留用户主动触发的那一下（点击后的弹跳）。这样屏幕安静了，但"我摸它有
+ * 反应"这件事还在。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .pet-figure,
+  .pet-eye,
+  .pet-ear-left,
+  .pet-ear-right {
+    animation: none;
+  }
+  .pet-root[data-mood='happy'] .pet-figure {
+    animation: pet-hop 0.5s ease-out;
+  }
+}

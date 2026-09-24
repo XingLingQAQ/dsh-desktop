@@ -12,6 +12,7 @@
 mod bridge;
 mod discover;
 mod host;
+mod pet;
 mod plugin_state;
 mod plugins;
 mod provision;
@@ -31,8 +32,8 @@ use serde_json::json;
 use tauri::{
     tray::TrayIconBuilder,
     webview::{Color, NewWindowResponse},
-    Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, Url, WebviewBuilder, WebviewUrl,
-    WebviewWindowBuilder, WindowEvent,
+    Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, RunEvent, Url, WebviewBuilder,
+    WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 
 use crate::bridge::Bridge;
@@ -356,6 +357,54 @@ fn open_settings(app: tauri::AppHandle) {
     let _ = app.emit("open-settings", ());
 }
 
+/// Show or hide the desktop pet.
+///
+/// Returns the state that actually took effect rather than the one requested, so
+/// a caller that asked to show a pet which then failed to appear is told so
+/// instead of rendering a toggle that disagrees with the desktop.
+#[tauri::command]
+fn set_pet_visible(app: tauri::AppHandle, visible: bool) -> Result<bool, String> {
+    if visible {
+        pet::show(&app)?;
+    } else {
+        pet::hide(&app)?;
+    }
+    Ok(pet::load().enabled)
+}
+
+/// Whether the pet is currently shown.
+#[tauri::command]
+fn pet_visible() -> bool {
+    pet::load().enabled
+}
+
+/// Remember where the pet is. Called after a drag settles.
+#[tauri::command]
+fn pet_save_position(app: tauri::AppHandle) {
+    pet::remember_position_now(&app);
+}
+
+/// Open the pet's own small menu, anchored to the pet window.
+///
+/// The pet usually sits at the bottom of the screen, so a menu anchored below it
+/// would hang off the desktop — the same trap the update popup hit, and the
+/// reason it opens upward. Horizontal overflow is handled by the clamp inside
+/// `show_tray_menu`, because the menu is wider than the pet.
+#[tauri::command]
+fn show_pet_menu(app: tauri::AppHandle) {
+    let Some(pet_window) = app.get_webview_window(pet::PET_LABEL) else { return };
+    let Ok(position) = pet_window.outer_position() else { return };
+    let Ok(size) = pet_window.outer_size() else { return };
+    let (_, menu_height) = tray_menu_inner_size(&app);
+    let below = position.y + size.height as i32;
+    let fits_below = match work_area() {
+        Some((_, _, _, area_bottom)) => below + menu_height <= area_bottom,
+        None => true,
+    };
+    let y = if fits_below { below } else { position.y - menu_height };
+    show_tray_menu(&app, position.x, y);
+}
+
 /// Quit the application (used by the custom tray menu).
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
@@ -565,7 +614,7 @@ fn show_update_popup(
 #[cfg(target_os = "windows")]
 fn watch_presses(popup: tauri::WebviewWindow) {
     use windows_sys::Win32::UI::Input::{
-        RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK, RIDEV_REMOVE,
+        RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK,
     };
 
     let Ok(hwnd) = popup.hwnd() else {
@@ -893,32 +942,127 @@ async fn resize_update_popup(app: tauri::AppHandle, height: f64) -> Result<(), S
     .map_err(|e| e.to_string())
 }
 
-/// Show the custom tray menu popup near the tray icon.
-fn show_tray_menu(app: &tauri::AppHandle, x: f64, y: f64) {
-    let menu_window = if let Some(win) = app.get_webview_window("tray-menu") {
-        win
-    } else {
-        let builder = WebviewWindowBuilder::new(
-            app,
-            "tray-menu",
-            WebviewUrl::App("tray-menu.html".into()),
+/// Logical size the tray menu is built at.
+///
+/// Named because the placement math needs a size before the window has ever been
+/// shown; the window's own report is preferred when it is available.
+const TRAY_MENU_WIDTH: f64 = 200.0;
+const TRAY_MENU_HEIGHT: f64 = 186.0;
+
+/// The primary monitor's work area in physical pixels — the screen minus the
+/// taskbar and any other appbars — as `(left, top, right, bottom)`.
+///
+/// This asks Windows directly instead of going through the windowing library's
+/// monitor list. The work area is exactly the rectangle "bottom-right, clear of
+/// the taskbar" means, and unlike an enumerated monitor it cannot come back
+/// empty in a remote session, which is what left the pet's first-run default
+/// unpositioned and let Windows cascade it into the top-left corner.
+#[cfg(windows)]
+pub(crate) fn work_area() -> Option<(i32, i32, i32, i32)> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SystemParametersInfoW, SM_CXSCREEN, SM_CYSCREEN, SPI_GETWORKAREA,
+    };
+
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            &mut rect as *mut RECT as *mut core::ffi::c_void,
+            0,
         )
-        .inner_size(200.0, 140.0)
+    };
+    if ok != 0 && rect.right > rect.left && rect.bottom > rect.top {
+        return Some((rect.left, rect.top, rect.right, rect.bottom));
+    }
+    // A session that reports no work area still has a screen. Plain metrics are
+    // a worse answer than the work area but a far better one than giving up.
+    let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+    if width > 0 && height > 0 {
+        return Some((0, 0, width, height));
+    }
+    None
+}
+
+#[cfg(not(windows))]
+pub(crate) fn work_area() -> Option<(i32, i32, i32, i32)> {
+    None
+}
+
+/// The tray menu's visible size in physical pixels.
+fn tray_menu_inner_size(app: &tauri::AppHandle) -> (i32, i32) {
+    let Some(window) = app.get_webview_window("tray-menu") else {
+        return (TRAY_MENU_WIDTH as i32, TRAY_MENU_HEIGHT as i32);
+    };
+    match (window.inner_size(), window.scale_factor()) {
+        (Ok(size), _) if size.width > 0 => (size.width as i32, size.height as i32),
+        (_, Ok(scale)) => (
+            (TRAY_MENU_WIDTH * scale).round() as i32,
+            (TRAY_MENU_HEIGHT * scale).round() as i32,
+        ),
+        _ => (TRAY_MENU_WIDTH as i32, TRAY_MENU_HEIGHT as i32),
+    }
+}
+
+/// Create the tray menu window if it does not exist yet, hidden.
+///
+/// Pre-created at startup for the same reason the update popup and the pet are —
+/// a webview build is a visible pause — but here it is not only about latency.
+/// Building a webview dispatches to the main thread and waits for it, and both
+/// callers of the menu (the tray icon's event handler and the pet's own menu
+/// command) already run on that thread. Building it from either one deadlocks
+/// the app instead of showing a menu, which is exactly what happened.
+fn prepare_tray_menu(app: &tauri::AppHandle) -> tauri::Result<WebviewWindow> {
+    if let Some(existing) = app.get_webview_window("tray-menu") {
+        return Ok(existing);
+    }
+    WebviewWindowBuilder::new(app, "tray-menu", WebviewUrl::App("tray-menu.html".into()))
+        // Height fits four rows (显示/隐藏宠物 added later); the menu is
+        // clipped rather than scrolled, so a short window silently hides the
+        // last entry.
+        .inner_size(TRAY_MENU_WIDTH, TRAY_MENU_HEIGHT)
         .decorations(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
         .visible(false)
-        .transparent(true);
-        match builder.build() {
-            Ok(win) => win,
-            Err(e) => {
-                eprintln!("dsh-desktop: create tray-menu window failed: {e}");
-                return;
-            }
-        }
+        .transparent(true)
+        .build()
+}
+
+/// Show the custom tray menu popup near the tray icon or the pet.
+///
+/// `x`/`y` are the desired position of the menu's **visible** top-left, in
+/// physical screen pixels — matching what [`work_area`] and the window APIs
+/// report, so no scale factor enters the arithmetic.
+///
+/// Deliberately never builds the window: see [`prepare_tray_menu`]. If it is
+/// missing the menu is skipped and logged, because a missing menu is a nuisance
+/// while a deadlocked shell is a lost session.
+fn show_tray_menu(app: &tauri::AppHandle, x: i32, y: i32) {
+    let Some(menu_window) = app.get_webview_window("tray-menu") else {
+        eprintln!("dsh-desktop: tray menu window is missing; not building it from here");
+        return;
     };
-    let _ = menu_window.set_position(LogicalPosition::new(x, y));
+    let (width, height) = tray_menu_inner_size(app);
+    // Clamp the visible card, not the window rectangle. The window carries an
+    // invisible resize frame (8px per side here, plus 1px at the top), so
+    // clamping the frame leaves the card hanging over the screen edge by exactly
+    // that much — which is what the first version of this did.
+    let (frame_x, frame_y) = match (menu_window.outer_position(), menu_window.inner_position()) {
+        (Ok(outer), Ok(inner)) => (inner.x - outer.x, inner.y - outer.y),
+        _ => (0, 0),
+    };
+    let (inner_x, inner_y) = match work_area() {
+        Some((left, top, right, bottom)) => (
+            x.clamp(left, (right - width).max(left)),
+            y.clamp(top, (bottom - height).max(top)),
+        ),
+        None => (x, y),
+    };
+    let _ = menu_window.set_position(PhysicalPosition::new(inner_x - frame_x, inner_y - frame_y));
     let _ = menu_window.show();
     let _ = menu_window.set_focus();
 }
@@ -1419,6 +1563,10 @@ pub fn run() {
             list_directory,
             finish_splash,
             show_main_window,
+            set_pet_visible,
+            pet_visible,
+            pet_save_position,
+            show_pet_menu,
             open_settings,
             quit_app,
             retry_launch
@@ -1524,9 +1672,22 @@ pub fn run() {
                         if button == tauri::tray::MouseButton::Right
                             && button_state == tauri::tray::MouseButtonState::Up
                         {
+                            // The tray rect arrives in either unit depending on
+                            // platform, and the menu is placed in physical
+                            // pixels. Mixing the two puts the menu in the wrong
+                            // place on any scaled display.
                             let (x, y) = match rect.position {
-                                tauri::Position::Physical(p) => (p.x as f64, p.y as f64),
-                                tauri::Position::Logical(p) => (p.x, p.y),
+                                tauri::Position::Physical(p) => (p.x, p.y),
+                                tauri::Position::Logical(p) => {
+                                    let scale = tray
+                                        .app_handle()
+                                        .primary_monitor()
+                                        .ok()
+                                        .flatten()
+                                        .map(|m| m.scale_factor())
+                                        .unwrap_or(1.0);
+                                    ((p.x * scale).round() as i32, (p.y * scale).round() as i32)
+                                }
                             };
                             show_tray_menu(tray.app_handle(), x, y);
                         } else if button == tauri::tray::MouseButton::Left
@@ -1551,6 +1712,24 @@ pub fn run() {
                 eprintln!("dsh-desktop: prepare update popup failed: {error}");
             }
 
+            // 宠物窗口同样先建好（隐藏）。它比更新弹窗更值得预热：宠物是用户
+            // 在"关掉主窗口"那一刻要的东西，而那正是最不该等两秒的时候。
+            if let Err(error) = pet::prepare(app.handle()) {
+                eprintln!("dsh-desktop: prepare pet failed: {error}");
+            }
+            if pet::load().enabled {
+                if let Err(error) = pet::show(app.handle()) {
+                    eprintln!("dsh-desktop: restore pet failed: {error}");
+                }
+            }
+
+            // 托盘菜单也先建好。这里不只是为了快：建 webview 会派发到主线程并
+            // 等待，而菜单的两个入口（托盘图标事件、宠物自己的菜单命令）本来
+            // 就跑在主线程上——在里面建窗口会把整个应用锁死，而不是弹出一个菜单。
+            if let Err(error) = prepare_tray_menu(app.handle()) {
+                eprintln!("dsh-desktop: prepare tray menu failed: {error}");
+            }
+
             // 关闭主窗口时：若开启“关闭到托盘”，则隐藏而不是退出。
             if let Some(main) = app.get_window("main") {
                 let settings_state = settings_state.clone();
@@ -1558,11 +1737,28 @@ pub fn run() {
                 let main_handle = main.clone();
                 main.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
-                        let close_to_tray = settings_state.lock().unwrap().close_to_tray;
-                        if close_to_tray && !quitting.load(Ordering::SeqCst) {
+                        // Two reasons to survive a close: the user asked for
+                        // close-to-tray, or the pet is on — and a pet on the
+                        // desktop with its window gone is the whole point of the
+                        // feature, so quitting here would take it away at the
+                        // exact moment it was wanted.
+                        let to_tray = settings_state.lock().unwrap().close_to_tray || pet::load().enabled;
+                        if to_tray && !quitting.load(Ordering::SeqCst) {
                             api.prevent_close();
                             let _ = main_handle.hide();
                         }
+                    }
+                });
+            }
+
+            // 宠物被拖动之后把新位置记下来。用 Moved 而不是在页面里算：位置是
+            // 窗口的属性，OS 拖动结束时会报到这个事件，而页面在拖动过程中收不
+            // 到任何回调。
+            if let Some(pet_window) = app.get_webview_window(pet::PET_LABEL) {
+                let pet_handle = app.handle().clone();
+                pet_window.on_window_event(move |event| {
+                    if let WindowEvent::Moved(_) = event {
+                        pet::remember_position(&pet_handle);
                     }
                 });
             }
@@ -1575,6 +1771,9 @@ pub fn run() {
         .expect("error while building dsh-desktop")
         .run(|app, event| {
             if let RunEvent::Exit = event {
+                // 退出前把宠物位置落盘：拖动结束后的延迟保存可能还没触发，而
+                // 这是最后一次能读到窗口位置的机会。
+                pet::remember_position_now(app);
                 // 退出时清理我们 spawn 的 host 进程树。
                 if let Some(slot) = app.try_state::<SharedHost>() {
                     if let Some(mut process) = slot.lock().unwrap().take() {
