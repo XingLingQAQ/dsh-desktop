@@ -84,6 +84,14 @@ function Pet() {
   const [dragOver, setDragOver] = useState(false);
   /** How many files are waiting to be sent, shown as a badge. */
   const [queued, setQueued] = useState(0);
+  /**
+   * A turn that ended while the main window was hidden.
+   *
+   * Held until the user opens the bubble. The point of it is to be noticed, and
+   * something that faded on its own after a few seconds is precisely what someone
+   * who stepped away would come back and miss.
+   */
+  const [missed, setMissed] = useState<{ kind: string; title: string } | null>(null);
   // The blink timer is cleared on unmount, and the reaction's timer is too — a
   // transparent always-on-top window that keeps waking up to flip a class is a
   // battery cost for no visible benefit.
@@ -123,6 +131,17 @@ function Pet() {
         // Ignore: the badge keeps its last value.
       }
     });
+    const unNotify = listen<string>("pet-notify", (event) => {
+      try {
+        const parsed = JSON.parse(event.payload) as { kind?: string; title?: string };
+        setMissed({
+          kind: typeof parsed?.kind === "string" ? parsed.kind : "completed",
+          title: typeof parsed?.title === "string" ? parsed.title : "",
+        });
+      } catch {
+        // Ignore: a malformed notice is not worth a broken window.
+      }
+    });
     // Read the queue once, in case files were dropped before this page loaded.
     void invoke<string>("pet_queue")
       .then((raw) => {
@@ -135,6 +154,7 @@ function Pet() {
       unState.then((fn) => fn());
       unDrag.then((fn) => fn());
       unQueue.then((fn) => fn());
+      unNotify.then((fn) => fn());
     };
   }, []);
 
@@ -172,6 +192,9 @@ function Pet() {
   }, []);
 
   const bubble = useCallback(() => {
+    // Opening the bubble is what the badge is asking for, so it clears here —
+    // that is the only thing that should clear it.
+    setMissed(null);
     void invoke("show_pet_bubble");
   }, []);
 
@@ -215,7 +238,12 @@ function Pet() {
   const label = useMemo(() => describe(session), [session]);
 
   return (
-    <div className="pet-root" data-mood={mood} data-drag={dragOver ? "over" : "off"}>
+    <div
+      className="pet-root"
+      data-mood={mood}
+      data-drag={dragOver ? "over" : "off"}
+      data-missed={missed === null ? "no" : missed.kind === "error" ? "error" : "yes"}
+    >
       {/* The whole body is the drag handle and the poke target. */}
       <div
         className="pet-body"
@@ -271,6 +299,16 @@ function Pet() {
         {queued > 0 && (
           <div className="pet-queue-badge" title={`${queued} 个文件待发送`}>
             {queued}
+          </div>
+        )}
+        {/* A mark for a turn that ended while the main window was hidden. It sits
+            at the opposite corner from the file badge so the two never collide. */}
+        {missed !== null && (
+          <div
+            className="pet-missed-badge"
+            title={missed.title === "" ? "刚才那个回合结束了" : missed.title}
+          >
+            {missed.kind === "error" ? "!" : "•"}
           </div>
         )}
       </div>

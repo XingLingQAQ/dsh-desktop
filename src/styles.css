@@ -2155,6 +2155,66 @@ html.pet-window body {
   pointer-events: none;
 }
 
+/* ── 有回合在你看不见的时候结束了 ────────────────────────────────────
+ *
+ * 这是宠物存在的理由本身：主窗口关着的时候，角落里 132px 的一张变了的脸很容易
+ * 被错过。所以它要主动说一声。
+ *
+ * 而且**不自己消失**：会自己淡掉的东西，恰恰是走开一会儿的人回来时看不到的那种。
+ * 只有打开气泡才会清掉它——那正是它在要的动作。
+ *
+ * 角标放左上，和右上的文件角标错开，两个同时出现也不会叠。
+ */
+.pet-missed-badge {
+  position: absolute;
+  left: 0;
+  top: 22px;
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--pet-hi);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.pet-root[data-missed='error'] .pet-missed-badge {
+  /* 出错用红色：这是唯一"要你回来看一眼"和"出事了"重合的状态。 */
+  background: #e5484d;
+}
+
+/* 轻轻晃几下就停，不循环。
+ *
+ * 晃的是 `.pet-body` 而不是 `.pet-figure`——后者已经被表情动画占用了（呼吸、
+ * 思考起伏、出错下坠），在这里再设一次 animation 会把表情顶掉，而"它在干什么"
+ * 比"有个新消息"更重要。
+ *
+ * 三次而不是无限：持续晃动会变成噪音，这是个"看一眼"的邀请，不是警报。 */
+.pet-root[data-missed='yes'] .pet-body,
+.pet-root[data-missed='error'] .pet-body {
+  animation: pet-nudge 1.1s ease-in-out 3;
+}
+
+@keyframes pet-nudge {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  15% {
+    transform: translateX(-3px) rotate(-1.5deg);
+  }
+  45% {
+    transform: translateX(3px) rotate(1.5deg);
+  }
+  75% {
+    transform: translateX(-1.5px);
+  }
+}
+
 /* ── 会话状态的表情 ────────────────────────────────────────────────────
  *
  * 宠物的脸跟着当前会话走：思考 / 执行工具 / 等待批准 / 完成 / 出错。
@@ -2388,6 +2448,11 @@ html.pet-window body {
   }
   .pet-root[data-drag='over'] .pet-drop-ring {
     transform: none;
+  }
+  /* 晃动去掉，但角标留着——它是"有新消息"唯一的信号，去掉就等于没提醒。 */
+  .pet-root[data-missed='yes'] .pet-body,
+  .pet-root[data-missed='error'] .pet-body {
+    animation: none;
   }
 }
 

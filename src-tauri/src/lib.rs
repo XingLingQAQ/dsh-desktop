@@ -426,6 +426,11 @@ fn origin_of(url: &str) -> Option<String> {
 fn start_pet_state_watch(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last = String::new();
+        // The last turn end this loop has already reacted to. `None` means it has
+        // not seen one yet, which is what stops the very first poll — which reads
+        // whatever the previous run left behind — from announcing a turn that
+        // finished before the pet existed.
+        let mut last_end_at: Option<u64> = None;
         loop {
             std::thread::sleep(PET_STATE_INTERVAL);
             if !pet::is_visible() {
@@ -442,10 +447,50 @@ fn start_pet_state_watch(app: tauri::AppHandle) {
             if body != last {
                 last = body.clone();
                 *LAST_PET_STATE.lock().unwrap() = Some(body.clone());
-                let _ = app.emit("pet-state", body);
+                let _ = app.emit("pet-state", body.clone());
+            }
+            // A turn ending is worth interrupting for only when nobody is looking.
+            // With the main window up, the transcript is right there and the pet's
+            // face is enough; with it hidden, a 132px face in a corner is easy to
+            // miss and the whole reason the pet exists is that case.
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+                let end = value.get("lastEnd");
+                let at = end.and_then(|e| e.get("at")).and_then(|a| a.as_u64());
+                if let Some(at) = at {
+                    let first = last_end_at.is_none();
+                    if last_end_at != Some(at) {
+                        last_end_at = Some(at);
+                        if !first && !main_window_visible(&app) {
+                            let kind = end
+                                .and_then(|e| e.get("kind"))
+                                .and_then(|k| k.as_str())
+                                .unwrap_or("completed");
+                            let title = value
+                                .get("title")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or_default();
+                            let _ = app.emit(
+                                "pet-notify",
+                                json!({ "kind": kind, "title": title }).to_string(),
+                            );
+                        }
+                    }
+                }
             }
         }
     });
+}
+
+/// Whether the main window is on screen.
+///
+/// `get_window` rather than `get_webview_window`: once the DSH content is
+/// attached as a child webview, the latter fails its `is_webview_window` check
+/// and returns `None` for a window that is very much still there — which would
+/// read as "not visible" and make the pet announce every turn.
+fn main_window_visible(app: &tauri::AppHandle) -> bool {
+    app.get_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
 }
 
 /// Logical size of the pet's bubble.
