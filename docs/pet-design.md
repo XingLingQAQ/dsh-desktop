@@ -256,7 +256,7 @@ turn/start(seq 4) → step/start → system/message → user/message → request
 | **1** | 壳 + 窗口 + 位置记忆 + 待机动画 + 右键菜单 | ✅ **已完成**（见 §11） |
 | **0** | 验 §5 那三条（能不能列会话 / 发消息 / 订阅回合） | ✅ **已实测通过**（见 §5） |
 | **2** | 气泡 + 状态反映（思考中/完成/出错） | ✅ **已完成**（见 §12） |
-| **3** | 宿主半插件 + 发消息 + 会话切换 | 未开始（§5 已验，地基已确认） |
+| **3** | 宿主半插件 + 发消息 + 会话切换 | ✅ **已完成**（见 §13） |
 | **4** | 文件接住 + 队列 + 喂给会话 | 未开始 |
 | **5** | 投喂/养成（可选） | 未开始 |
 
@@ -392,7 +392,7 @@ Escape 的 `hide()` 也会被拒。症状看起来像"气泡没接上数据"，�
 
 六种表情逐项量过计算样式，每个都确实不同（耳朵角度、眼睛缩放、嘴形、忙碌点）。
 
-### 12.4 顺带发现的第三个问题（**还没修**）
+### 12.4 第三个问题：孤儿宿主（**已修，见 §13.1**）
 
 调试时 UI 发消息一直被服务端拒绝：
 
@@ -405,7 +405,63 @@ SessionAlreadyOwnedError: session "..." is already owned by an active write hand
 （最早一个是 9/21 的），每个都占着会话的写租约。
 
 **这对用户也是真的**：应用崩溃、或者从任务管理器结束进程，都会留下孤儿宿主，
-而症状是"发消息没反应"——非常难查。修法是启动时清理父进程已死的 DSH 宿主，
-需要枚举进程（`CreateToolhelp32Snapshot`），这次没做。
+而症状是"发消息没反应"——非常难查。修法见 §13.1。
+
+---
+
+## 13. 第 3 期：发消息 + 会话切换（含 §12.4 的修复）
+
+### 13.1 先修孤儿宿主：让内核负责，而不是让清理代码负责
+
+上一节说"修法是启动时清理父进程已死的宿主"。**那个思路是错的**——它要靠一段清理代码
+去跑，而问题恰恰是"清理代码没机会跑"。
+
+正确的做法是 **job object**：宿主 spawn 出来后立刻放进一个带
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 job。这个 flag 的语义是"最后一个 job 句柄关闭时，
+杀掉 job 里的所有进程"，而**进程死亡时操作系统会关闭它的句柄**——不管它是正常退出、
+崩溃，还是被任务管理器强杀。于是"宿主跟着壳一起死"变成了内核的职责，不需要任何一行
+我们的代码被执行。
+
+句柄故意**不关闭**（存成 `isize` 泄漏掉）：关闭它就是触发点，让它随进程消亡而由系统回收
+才是我们要的语义。
+
+**实测**（`scripts/host-orphan-test.ps1`）：按父进程找到宿主 → `Stop-Process -Force` 强杀壳
+→ 5 秒后宿主**已消失**，壳下剩余子进程 **0**。修复前同样的操作会留下孤儿。
+
+> 顺带一提，这也是为什么"启动时杀所有 DSH 宿主"是错的：这台机器上同时跑着**别的** DSH
+> 宿主（比如正在执行这段对话的那个），按名字杀会把它一起干掉。job object 天然只影响
+> 我们自己 spawn 的那一个。
+
+### 13.2 新增的路由与命令
+
+| 层 | 东西 | 作用 |
+|---|---|---|
+| 宿主 | `GET /dsh-desktop-pet/sessions` | 活会话 ∪ 落盘会话，30 条上限，带 `live` 标记 |
+| 宿主 | `POST /dsh-desktop-pet/prompt` | `{sessionId, text}` → `{ok}` 或 `{ok:false, error:{code,message}}` |
+| 宿主 | `POST /dsh-desktop-pet/select` | 把宠物**钉**到某个会话上 |
+| 壳 | `pet_sessions` / `pet_send_prompt` / `pet_select_session` | 转成 Tauri 命令给气泡用 |
+| 气泡 | 会话选择器 + 输入框 + 发送按钮 | — |
+
+**「钉住」的语义**：默认跟随"最近有动静的会话"，这在默认情况下对、在用户**明确指定**一个
+之后就不对了。所以显式选择优先。但当**另一个**会话开始新回合时，钉子会被摘掉——用户
+明显已经去别处干活了，宠物还赖在旧选择上就是错的。
+
+**失败信息必须原样透传**。宿主拒绝时的 `error.message` 里带着原因（实测：
+`SessionAlreadyOwnedError: … already owned by an active write handle`），气泡直接显示它。
+把它换成"发送失败"会让这类问题彻底无法排查——上面那个孤儿宿主 bug 就是这么找出来的。
+
+### 13.3 实测过的
+
+| 命令 | 结果 |
+|---|---|
+| `pet_sessions` | 26 个会话，字段 `[id, title, activity, live, updatedAt]` |
+| `pet_select_session` | 切换成功，返回新 current |
+| `pet_send_prompt` | `{"ok":true}`，宿主随即 `activity=thinking, turn=1` |
+| 空文本 | `{"ok":false,"error":{"code":"invalid-request","message":"text is required"}}` |
+| 空 sessionId | `{"ok":false,"error":{"code":"invalid-request","message":"sessionId is required"}}` |
+
+**完整闭环**：在气泡里选中一个会话 → 从宠物发一句话 → 回合跑起来 → 学到标题
+（`title: "probe-ui: 只回复 ok"`）→ 状态与表情跟上（`lastEnd: {kind:"error", code:"SERVER"}`）。
+
 
 

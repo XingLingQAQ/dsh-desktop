@@ -2384,7 +2384,9 @@ html.pet-bubble-window body {
   }
 }
 
+/* 固定高度：下面的三行才是有余量可让的那几行，状态行被压扁的话最先没的是它。 */
 .pet-bubble-head {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2433,27 +2435,347 @@ html.pet-bubble-window body {
   }
 }
 
-/* 会话标题：可能很长，一行截断。气泡不滚动——需要滚动的内容属于主窗口。 */
+/* ── 垂直预算 ────────────────────────────────────────────────────────
+ *
+ * 窗口 268×156，卡片铺满，减掉 14/16 的内边距后内容盒是 236×128。下面每一行都
+ * 是按这个数配的：
+ *
+ *     head        21   14 号字 × 继承来的 1.45 行高
+ *     gap          8
+ *     picker      22   12.5 号字 18 + 触发区上下各 2
+ *     gap          8
+ *     composer    28   输入框，发送键同高
+ *     gap          8
+ *     foot       ≥16   吃掉剩下的 33；两行的报错是 32
+ *                ───
+ *                 128
+ *
+ * 余量故意放在最下面的 foot：只有它的内容会变高（提示一行，主机拒绝两行），把
+ * 余量给它，上面两行就不会因为多出一行字而整体上移。
+ */
+
+/* 会话标题：永远一行。以前是两行截断——现在那一行归输入框了，而且一个两行高的
+   控件也不像控件。有得选的时候它是选择器的触发区，没得选的时候是纯文字，所以
+   这条规则描述的是**文字**本身，变的是它所在的那一行。 */
 .pet-bubble-session {
   flex: 1;
-  min-height: 0;
+  min-width: 0;
   font-size: 12.5px;
   color: var(--ds-label-2);
   overflow: hidden;
+  white-space: nowrap;
   text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
 }
 
 .pet-bubble-muted {
   color: var(--ds-label-3);
 }
 
-.pet-bubble-foot {
+/* 长工具名不能把状态点挤出卡片：标题怎么截断，这一行就怎么截断。 */
+.pet-bubble-state {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 展开的列表挂在选择器这一层而不是卡片上，这样定位不用量任何东西：触发区就是
+   这个盒子的顶部。 */
+.pet-bubble-picker {
+  position: relative;
   flex: none;
-  font-size: 11px;
+}
+
+/* 标题做成可点的样子。负外边距配等量内边距，让 hover 面比文字大一圈，而文字的
+   位置和"没得选时"的纯文字完全对齐——不然有选择器时标题会右移 4px。宽度必须是
+   auto：块级盒 + 100% 宽再加负外边距会过约束，浏览器只能丢掉右边的负外边距，那
+   一圈 hover 面就会左右不对称。 */
+.pet-bubble-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 -4px;
+  padding: 2px 4px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ds-label-2);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.pet-bubble-trigger:hover:not(:disabled),
+.pet-bubble-trigger[aria-expanded='true'] {
+  background: var(--ds-hover);
+}
+
+.pet-bubble-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* 12px，和更新弹窗那个下拉的箭头同尺寸：同一个手势，不该看着像另一个控件。 */
+.pet-bubble-caret {
+  flex: none;
+  width: 12px;
+  height: 12px;
   color: var(--ds-label-3);
+  stroke-width: 1.4;
+  transition: transform 0.12s ease;
+}
+
+.pet-bubble-trigger[aria-expanded='true'] .pet-bubble-caret {
+  transform: rotate(180deg);
+}
+
+/* 列表朝下展开，方向就是空间决策：触发区在 156 高的窗口里位于 y≈43，下面还有
+   ~87px，上面只有状态行要用的那 43。82 给阴影留了不贴窗口下沿的一点余量。
+   限高 + 滚动，而不是撑开：窗口撑不大，比窗口还高的弹层等于最后几行被切掉。 */
+.pet-bubble-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 82px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 2px;
+  border: 1px solid var(--ds-border-2);
+  border-radius: 8px;
+  background: var(--ds-bg-1);
+  box-shadow:
+    0 0 1px 0 rgba(0, 0, 0, 0.2),
+    0 8px 24px 0 rgba(0, 0, 0, 0.18);
+  /* 只淡入，不做位移：一次性淡入正是减弱动效策略会保留的那一类。 */
+  animation: pet-bubble-fade 0.12s ease both;
+  /* 滚动条藏起来，和这个应用其它地方一致（.upd-notes、.upd-log）。列表高度取的
+     是 3.15 行而不是整数行，下一行会被切掉一截——"下面还有"由这个说。 */
+  scrollbar-width: none;
+}
+
+.pet-bubble-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+@keyframes pet-bubble-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 26 高、r5、12 号字，照更新弹窗的紧凑档菜单行：这个列表很短，常规档的 34 高
+   会比上面的触发区还重。 */
+.pet-bubble-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ds-label);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pet-bubble-item:hover {
+  background: var(--ds-hover);
+}
+
+/* 没有活跃句柄的会话不是没了——它照样能选中、能写进去——所以是压暗，不是隐藏。 */
+.pet-bubble-item[data-dormant='yes'] .pet-bubble-itemLabel {
+  opacity: 0.55;
+}
+
+.pet-bubble-itemLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 每行自己的状态点。它故意不复用 .pet-bubble-dot：那个类的颜色来自
+   .pet-bubble[data-tone]，复用会让整个列表都被卡片自己的语气染色。这里也不呼吸
+   ——一列会呼吸的点是噪音，颜色本身已经说完了。 */
+.pet-bubble-itemDot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ds-label-3);
+}
+
+.pet-bubble-itemDot[data-activity='thinking'],
+.pet-bubble-itemDot[data-activity='tool'] {
+  background: var(--ds-brand);
+}
+
+.pet-bubble-itemDot[data-activity='waiting'] {
+  background: var(--ds-warn);
+}
+
+.pet-bubble-itemDot[data-activity='done'] {
+  background: var(--ds-success);
+}
+
+.pet-bubble-itemDot[data-activity='error'] {
+  background: var(--ds-error);
+}
+
+.pet-bubble-check {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  stroke-width: 1.6;
+  color: var(--ds-label);
+}
+
+/* 输入行，照更新弹窗的 Input 配方：r8、l2 发丝描边、bg-1 底。高度取 28 而不是
+   DSH 的 32——卡片只有 128，这 4px 正好是 foot 第二行的钱。 */
+.pet-bubble-compose {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pet-bubble-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--ds-border-2);
+  border-radius: 8px;
+  background: var(--ds-bg-1);
+  color: var(--ds-label);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+  /* 卡片关掉了选择（气泡不是文档），输入框是唯一必须把它打开的地方。 */
+  user-select: text;
+  /* 输入框自己不出焦点环：文本输入在鼠标点击时同样命中 :focus-visible，而 2px
+     的环套在一个 28 高的盒子上比盒子本身还重。光标 + 下面的品牌色描边就是焦点
+     态。 */
+  outline: none;
+}
+
+.pet-bubble-input::placeholder {
+  color: var(--ds-label-3);
+}
+
+.pet-bubble-input:focus {
+  border-color: var(--ds-brand);
+}
+
+/* 禁用和只读共用一套样子：两者都是"现在写不进去"。发送中用只读而不是禁用，因为
+   禁用的输入框拿不住焦点——发一句话就把光标丢了，下一句得先点一下。另外，禁用时
+   不降透明度：占位符是"没有会话可发"这个理由唯一放得下的地方，压暗它等于把答案
+   藏起来。 */
+.pet-bubble-input:disabled,
+.pet-bubble-input:read-only {
+  background: transparent;
+  color: var(--ds-label-3);
+  cursor: not-allowed;
+}
+
+/* 发送键是卡片上唯一的实心按钮——这里唯一会改变窗口之外某个东西的动作。r8 是为
+   了和旁边的输入框配对，更新弹窗那种 18px 圆角在这个高度会变成一个圆。 */
+.pet-bubble-send {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: var(--ds-brand);
+  color: var(--ds-brand-invert);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+/* hover 用 color-mix 在品牌色上抬一点，而不是写死一个灰：--ds-brand 浅色主题里
+   接近黑、深色主题里接近白，写死的值总会在其中一个里把按钮压没。 */
+.pet-bubble-send:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ds-brand) 88%, var(--ds-brand-invert));
+}
+
+.pet-bubble-send:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.pet-bubble-send:disabled {
+  background: transparent;
+  color: var(--ds-label-3);
+  box-shadow: inset 0 0 0 1px var(--ds-border-2);
+  cursor: not-allowed;
+}
+
+.pet-bubble-sendIcon {
+  width: 12px;
+  height: 12px;
+  stroke-width: 1.6;
+}
+
+/* 转圈复用更新弹窗的 @keyframes upd-spin：同一个样式表，同一个动作，不再抄一份
+   同名的关键帧。 */
+.pet-bubble-spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid currentcolor;
+  border-top-color: transparent;
+  animation: upd-spin 0.7s linear infinite;
+}
+
+/* 键盘走到哪儿要看得见；鼠标点不给环，免得点一下留一圈。 */
+.pet-bubble-trigger:focus-visible,
+.pet-bubble-item:focus-visible,
+.pet-bubble-send:focus-visible {
+  outline: 2px solid var(--ds-brand);
+  outline-offset: 1px;
+}
+
+/* foot 是唯一会变高的一行：提示一行，主机的拒绝两行。它吃掉卡片的余量（见开头
+   的预算），所以拒绝出现时上面的标题和输入行一动不动。 */
+.pet-bubble-foot {
+  flex: 1;
+  min-height: 16px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ds-label-3);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  /* 截断而不是滚动：卡片只有两行的位置，全文在元素的 title 上等着想看完的人。 */
+  word-break: break-word;
+}
+
+/* 拒绝原文照登——主机那句话是唯一说得出"接下来该怎么办"的东西——所以给它错误
+   色，并允许选中，好让人把这样一条消息带进问题报告里。 */
+.pet-bubble-foot[data-tone='error'] {
+  color: var(--ds-error);
+  user-select: text;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2467,5 +2789,23 @@ html.pet-bubble-window body {
   .pet-bubble[data-tone='busy'] .pet-bubble-dot,
   .pet-bubble[data-tone='waiting'] .pet-bubble-dot {
     opacity: 1;
+  }
+  /* 颜色过渡和箭头那半圈翻转，是没人要求看的位移，直接跳变。列表的淡入留着
+     ——一次性淡入正是这套策略放过的东西（见 .upd-notice）。 */
+  .pet-bubble-trigger,
+  .pet-bubble-caret,
+  .pet-bubble-send {
+    transition: none;
+  }
+  .pet-bubble-trigger[aria-expanded='true'] .pet-bubble-caret {
+    transform: none;
+  }
+  .pet-bubble-send:active:not(:disabled) {
+    transform: none;
+  }
+  /* 放慢而不是停掉：按钮变平之后，它是卡片上唯一还能说"正在发"的东西。更新弹窗
+     的转圈已经开过这个口子。 */
+  .pet-bubble-spinner {
+    animation-duration: 2s;
   }
 }

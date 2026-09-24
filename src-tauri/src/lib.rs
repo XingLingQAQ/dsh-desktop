@@ -452,8 +452,13 @@ fn start_pet_state_watch(app: tauri::AppHandle) {
 /// Wide enough for a session title and two short lines; deliberately not a chat
 /// transcript. The bubble answers "what is it doing", and anything that needs
 /// scrolling belongs in the main window.
+///
+/// The height is set by the *failure* path rather than the happy one: a refusal
+/// from the host (`SessionAlreadyOwnedError`, and friends) runs to about three
+/// lines at this width, and a failure message that has to be hovered to be read
+/// is a failure message nobody reads.
 const PET_BUBBLE_WIDTH: f64 = 268.0;
-const PET_BUBBLE_HEIGHT: f64 = 156.0;
+const PET_BUBBLE_HEIGHT: f64 = 172.0;
 
 /// The most recent session-state document.
 ///
@@ -546,6 +551,68 @@ fn hide_pet_bubble(app: tauri::AppHandle) {
     if let Some(bubble) = app.get_webview_window("pet-bubble") {
         let _ = bubble.hide();
     }
+}
+
+/// The pet bubble's view of every session, straight from the host.
+///
+/// Returned as the host's own JSON string rather than a typed struct: the shape
+/// is the plugin's, and mirroring it in Rust would be a second definition to keep
+/// in step for no benefit — the only consumer is the bubble, which parses it.
+#[tauri::command]
+fn pet_sessions(app: tauri::AppHandle) -> Result<String, String> {
+    let url = format!("{}/dsh-desktop-pet/sessions", pet_host_origin(&app)?);
+    host::http_get_body(&url).ok_or_else(|| "取不到会话列表".to_string())
+}
+
+/// Point the pet at one session.
+#[tauri::command]
+fn pet_select_session(app: tauri::AppHandle, session_id: String) -> Result<String, String> {
+    let url = format!("{}/dsh-desktop-pet/select", pet_host_origin(&app)?);
+    let body = json!({ "sessionId": session_id }).to_string();
+    let answer = host::http_post_json(&url, &body).ok_or_else(|| "切换会话失败".to_string())?;
+    // The command returns the new current id, or null when the host refused. The
+    // bubble applies it immediately so the title answers the click instead of
+    // waiting a poll interval.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&answer).map_err(|e| format!("切换会话返回无法解析：{e}"))?;
+    if parsed.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(parsed
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("切换会话失败")
+            .to_string());
+    }
+    Ok(parsed
+        .get("current")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string())
+}
+
+/// Send a prompt into a session from the pet's bubble.
+///
+/// Always resolves with the host's own JSON (`{"ok":true}` or
+/// `{"ok":false,"error":{…}}`) rather than turning a refusal into a rejected
+/// promise. The refusal carries the reason — a real one is
+/// `SessionAlreadyOwnedError` — and the bubble renders that text, so it has to
+/// survive the trip. Only a transport failure becomes an `Err`.
+#[tauri::command]
+fn pet_send_prompt(app: tauri::AppHandle, session_id: String, text: String) -> Result<String, String> {
+    let url = format!("{}/dsh-desktop-pet/prompt", pet_host_origin(&app)?);
+    let body = json!({ "sessionId": session_id, "text": text }).to_string();
+    host::http_post_json(&url, &body).ok_or_else(|| "发不出去：宿主没有响应".to_string())
+}
+
+/// Where the DSH host is listening, without the auth token.
+fn pet_host_origin(app: &tauri::AppHandle) -> Result<String, String> {
+    let state = app
+        .try_state::<SharedState>()
+        .ok_or_else(|| "启动状态不可用".to_string())?;
+    let url = state.lock().unwrap().url.clone();
+    url.as_deref()
+        .and_then(origin_of)
+        .ok_or_else(|| "宿主还没就绪".to_string())
 }
 
 /// Open the pet's own small menu, anchored to the pet window.
@@ -1805,6 +1872,9 @@ pub fn run() {
             show_pet_bubble,
             hide_pet_bubble,
             pet_session_state,
+            pet_sessions,
+            pet_select_session,
+            pet_send_prompt,
             open_settings,
             quit_app,
             retry_launch

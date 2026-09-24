@@ -25,7 +25,17 @@
  * context is untagged and therefore receives *every* session's events, so the
  * plugin has to pick one to be "the" session — and "the one you were just using"
  * is the only answer that matches what a person expects from a desktop pet.
+ *
+ * ## The other two routes
+ *
+ * `/sessions` and `/prompt` exist because the pet is also the way back into DSH
+ * once the main window is closed: the desktop is then the only surface left, so
+ * it has to be able to say which sessions exist and to put a message into one.
+ * Both read the same event-derived state as `/state` — the picker shows the
+ * activity the pet's face is showing rather than a second opinion about it.
  */
+
+import { randomUUID } from 'node:crypto'
 
 export const name = 'dsh-desktop-pet'
 
@@ -39,6 +49,31 @@ const DONE_LINGER_MS = 6_000
 
 /** How long an error stays before the pet settles. Errors are worth noticing. */
 const ERROR_LINGER_MS = 15_000
+
+/**
+ * How long one corpus listing is reused.
+ *
+ * `sessionQuery.listSessions()` reaches persistence as well as memory, and this
+ * plugin is polled on a timer, so the listing is cached rather than re-derived
+ * per request. Short enough that a session created in the UI appears in the
+ * picker while the user is still looking at it.
+ */
+const CORPUS_TTL_MS = 3_000
+
+/**
+ * How many sessions the picker is offered.
+ *
+ * This is a short menu, not a history browser: past this many the list stops
+ * being scannable, and the shell would be carrying titles and activity for
+ * sessions nobody is about to pick.
+ */
+const MAX_SESSIONS = 30
+
+/**
+ * Ceiling on a request body, matching the other desktop plugin routes.
+ * A prompt is text; anything approaching this is a caller mistake.
+ */
+const MAX_BODY_BYTES = 64 * 1024
 
 /**
  * Activity values the pet can be in.
@@ -86,6 +121,17 @@ function activityForTurnEnd(reason) {
 export function apply(ctx) {
   /** The session the pet is currently reporting on. */
   let current = null
+  /**
+   * A session the user picked in the bubble, if any.
+   *
+   * Following whichever session moved last is right by default and wrong the
+   * moment someone deliberately points the pet at one, so an explicit pick
+   * outranks it. The pin is dropped when a *different* session starts a turn:
+   * working somewhere else is the clearest possible signal that the pet should
+   * follow, and without this the pet would sit on a stale choice while the user
+   * has visibly moved on.
+   */
+  let pinned = null
   /** sessionId → { title, activity, tool, turn, lastEnd, movedAt } */
   const sessions = new Map()
   /**
@@ -104,6 +150,13 @@ export function apply(ctx) {
   } catch {
     titleService = null
   }
+  /**
+   * The cached session corpus, and the read in flight for the next one.
+   *
+   * Kept per plugin instance rather than at module scope so that two mounts
+   * cannot serve each other's sessions.
+   */
+  const corpus = { at: 0, records: null, inFlight: null }
 
   /**
    * The view for one session, created on first mention.
@@ -151,6 +204,10 @@ export function apply(ctx) {
       view.tool = null
       view.turn = typeof event?.data?.turn === 'number' ? event.data.turn : view.turn
       view.lastEnd = null
+      // A turn starting somewhere else means the user moved on, so the pet
+      // follows. Without this an explicit pick would stick even after they had
+      // visibly gone to work in another conversation.
+      if (pinned !== null && pinned !== id) pinned = null
     } else if (type === 'tool/call') {
       const name = typeof event?.data?.name === 'string' ? event.data.name : null
       view.activity = ACTIVITY.tool
@@ -194,29 +251,338 @@ export function apply(ctx) {
     kind: 'prefix',
     path: PREFIX,
     handler: (req, res) => {
-      serve(req, res, {
+      serve(req, res, ctx, {
         sessions,
-        current: () => current,
+        current: () => pinned ?? current,
+        setPinned: (id) => { pinned = id },
         diagnostics: () => ({ eventCount }),
+        corpus,
+        // `titleOf` closes over the title service resolved at load, so the
+        // picker borrows this instance's helper rather than looking it up again.
+        titleOf,
+      }).catch((error) => {
+        // A route that throws must still answer. The shell polls `/state` on a
+        // timer, so a socket left open would stack one hung poll per interval
+        // instead of surfacing as a single visible failure.
+        if (res.headersSent) {
+          res.destroy()
+          return
+        }
+        json(res, 500, { error: 'internal error', message: messageOf(error) })
       })
     },
   }), 'dsh-desktop-pet: session state route')
 }
 
 /**
- * Answer a state request.
+ * Answer one request on this plugin's prefix.
  * @param {import('node:http').IncomingMessage} req - the request.
  * @param {import('node:http').ServerResponse} res - the response.
- * @param {{sessions: Map<string, object>, current: () => string | null, diagnostics: () => object}} store - the live state.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context, for the services only some routes need.
+ * @param {{sessions: Map<string, object>, current: () => string | null, diagnostics: () => object, corpus: object, titleOf: (session: object) => string | null}} store - the live state.
+ * @returns {Promise<void>} resolved once the answer is written.
  */
-function serve(req, res, store) {
+async function serve(req, res, ctx, store) {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
   const route = url.pathname.slice(PREFIX.length)
-  if (route !== '/state') {
-    json(res, 404, { error: 'no such route', routes: ['/state'] })
+  if (route === '/state') {
+    json(res, 200, { ...snapshot(store), ...store.diagnostics() })
     return
   }
-  json(res, 200, { ...snapshot(store), ...store.diagnostics() })
+  if (route === '/sessions') {
+    json(res, 200, await sessionList(store, ctx))
+    return
+  }
+  if (route === '/prompt') {
+    await servePrompt(req, res, ctx)
+    return
+  }
+  if (route === '/select') {
+    await serveSelect(req, res, store)
+    return
+  }
+  json(res, 404, {
+    error: 'no such route',
+    routes: ['/state', '/sessions', '/prompt', '/select'],
+  })
+}
+
+/**
+ * Point the pet at one session.
+ *
+ * Deliberately does not check that the id exists: a session can be live in the
+ * UI a moment before this host has seen an event for it, and refusing the pick
+ * then would be a race the user cannot see. An unknown id simply reports as an
+ * idle session with no title until something happens in it.
+ * @param {import('node:http').IncomingMessage} req - the request.
+ * @param {import('node:http').ServerResponse} res - the response.
+ * @param {{setPinned: (id: string) => void}} store - the live state.
+ * @returns {Promise<void>} resolved once the answer is written.
+ */
+async function serveSelect(req, res, store) {
+  if (req.method !== 'POST') {
+    promptError(res, 'invalid-request', 'select requires POST')
+    return
+  }
+  let body
+  try {
+    body = await readJson(req)
+  } catch (error) {
+    promptError(res, 'invalid-request', messageOf(error))
+    return
+  }
+  const id = typeof body?.sessionId === 'string' ? body.sessionId.trim() : ''
+  if (id === '') {
+    promptError(res, 'invalid-request', 'sessionId is required')
+    return
+  }
+  store.setPinned(id)
+  json(res, 200, { ok: true, current: id })
+}
+
+/**
+ * The picker's view of every session this host knows about.
+ *
+ * Two sources are joined because neither alone is enough. The corpus listing
+ * knows about sessions that are not loaded right now; `ctx.sessions` is the
+ * only one that is current to the millisecond, and a session created since the
+ * cached listing was taken is live before it is listed.
+ * @param {{sessions: Map<string, object>, current: () => string | null, corpus: object, titleOf: (session: object) => string | null}} store - the live state.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ * @returns {Promise<{current: string | null, sessions: object[]}>} the payload.
+ */
+async function sessionList(store, ctx) {
+  const now = Date.now()
+  /** id → live `Session`, for the title fold and for a `live` flag that is not stale. */
+  const liveSessions = new Map()
+  const registry = service(ctx, 'sessions')
+  // Whether the live enumeration actually answered. Without it, a failed
+  // `list()` would report every session as not live; with it, the cached
+  // listing's own flag is the fallback instead.
+  let liveKnown = false
+  if (registry !== null) {
+    try {
+      for (const session of registry.list()) {
+        if (typeof session?.id === 'string') liveSessions.set(session.id, session)
+      }
+      liveKnown = true
+    } catch {
+      // Leave `liveKnown` false and let the corpus speak.
+    }
+  }
+
+  /**
+   * One picker row.
+   * @param {string} id - the session id.
+   * @param {object | null} header - the session header, when one is known.
+   * @param {boolean} corpusLive - the corpus listing's `live` flag.
+   * @returns {object} the row.
+   */
+  const rowFor = (id, header, corpusLive) => {
+    const view = store.sessions.get(id)
+    const session = liveSessions.get(id)
+    return {
+      id,
+      // A title learned from this run's `session/title` event wins over the
+      // title service: it is what the session itself last recorded.
+      title: view?.title ?? (session === undefined ? null : store.titleOf(session)),
+      // Projected through the same linger windows as the pet's own face, so the
+      // picker cannot still say "done" about a session the pet has settled.
+      activity: view === undefined ? ACTIVITY.idle : activityAt(view, now),
+      live: liveKnown ? liveSessions.has(id) : corpusLive,
+      // A session that has moved under this plugin reports when it last did;
+      // one it has never seen an event for can only report when it was created.
+      updatedAt: view !== undefined && view.movedAt > 0 ? view.movedAt : createdAtOf(header),
+    }
+  }
+
+  const rows = new Map()
+  for (const record of (await corpusRecords(ctx, store)) ?? []) {
+    const header = record?.header
+    const id = typeof header?.id === 'string' ? header.id : null
+    if (id === null) continue
+    rows.set(id, rowFor(id, header, record.live === true))
+  }
+  // A session created after the listing was cached is live but not in it yet.
+  for (const [id, session] of liveSessions) {
+    if (!rows.has(id)) rows.set(id, rowFor(id, session.header, true))
+  }
+  const current = store.current()
+  if (current !== null && !rows.has(current)) {
+    // The pet is describing a session the corpus no longer lists — a disposed
+    // child that was never persisted, say. The picker still has to be able to
+    // show it selected, or it would contradict `/state`.
+    rows.set(current, rowFor(current, null, liveSessions.has(current)))
+  }
+  const sessions = [...rows.values()]
+    // Newest first, by the same timestamp each row reports. Ids break ties so
+    // that two sessions touched in the same millisecond keep a stable order.
+    .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))
+    .slice(0, MAX_SESSIONS)
+  return { current, sessions }
+}
+
+/**
+ * The session corpus, reused for a few seconds at a time.
+ *
+ * `listSessions()` is the only way to see sessions that are not loaded, and it
+ * touches persistence to do it — too expensive to repeat for a route the shell
+ * may poll as often as `/state`.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ * @param {{corpus: object}} store - the live state.
+ * @returns {Promise<object[] | null>} the records, or null when none were ever read.
+ */
+async function corpusRecords(ctx, store) {
+  const cache = store.corpus
+  if (cache.records !== null && Date.now() - cache.at < CORPUS_TTL_MS) return cache.records
+  // One slow read, however many requests are waiting on it.
+  if (cache.inFlight !== null) return cache.inFlight
+  const pending = readCorpus(ctx, store).finally(() => {
+    // Timed from the attempt, not from the success: a backend that fails slowly
+    // must not be asked again on every request.
+    cache.at = Date.now()
+    if (cache.inFlight === pending) cache.inFlight = null
+  })
+  cache.inFlight = pending
+  return pending
+}
+
+/**
+ * Read the corpus once, keeping the previous listing when the read fails.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ * @param {{corpus: object}} store - the live state.
+ * @returns {Promise<object[] | null>} the records, or null when none were ever read.
+ */
+async function readCorpus(ctx, store) {
+  const cache = store.corpus
+  try {
+    const query = service(ctx, 'sessionQuery')
+    if (query === null) return cache.records
+    const records = await query.listSessions()
+    // A listing that is not an array is a backend bug; the previous one, or the
+    // live sessions alone, still answer the picker.
+    if (Array.isArray(records)) cache.records = records
+  } catch {
+    // A backend that is briefly unavailable should not empty the picker, so the
+    // last good listing stands until a later attempt replaces it.
+  }
+  return cache.records
+}
+
+/**
+ * Answer a prompt request.
+ *
+ * Success and failure are both HTTP 200 with an `ok` discriminant: the shell
+ * tells them apart by the body, and a non-200 would read as a transport fault
+ * rather than as the host refusing the message.
+ * @param {import('node:http').IncomingMessage} req - the request.
+ * @param {import('node:http').ServerResponse} res - the response.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ * @returns {Promise<void>} resolved once the answer is written.
+ */
+async function servePrompt(req, res, ctx) {
+  if (req.method !== 'POST') {
+    // Not a prompt failure but a caller mistake, so 405 is the honest status;
+    // the body keeps the same shape so the shell parses either answer alike.
+    json(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'prompt accepts POST' } })
+    return
+  }
+  let body
+  try {
+    body = await readJson(req)
+  } catch (error) {
+    // An unreadable body is the caller's mistake, and saying which one is what
+    // lets the shell show something better than "send failed".
+    promptError(res, 'invalid-request', messageOf(error))
+    return
+  }
+  const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : ''
+  const text = typeof body?.text === 'string' ? body.text : ''
+  if (sessionId === '') {
+    promptError(res, 'invalid-request', 'sessionId is required')
+    return
+  }
+  // Only the emptiness check trims: the message itself is sent as typed.
+  if (text.trim() === '') {
+    promptError(res, 'invalid-request', 'text is required')
+    return
+  }
+  // The controller rather than `agents.get(id).followup(…)`: it resumes the
+  // session when it is not loaded and enforces the subagent-ownership fence,
+  // and going around it would skip both.
+  const controller = service(ctx, 'sessionController')
+  if (controller === null) {
+    promptError(res, 'unavailable', 'the session controller is not loaded in this host')
+    return
+  }
+  try {
+    await controller.prompt({
+      // The inbox keys on `requestId` and rejects a repeat, so it has to be
+      // minted per attempt rather than reused across retries.
+      requestId: randomUUID(),
+      sessionId,
+      // The pet has no way to ask for a steer, and queueing is the
+      // non-destructive default: a steer would cut into a running turn.
+      mode: 'queue',
+      content: [{ type: 'text', text }],
+      // Deliberately never aborted. The prompt is the user's intent rather than
+      // the poll, and `prompt` only consults the signal before it starts — so
+      // tying it to this socket would advertise a cancellation that would not
+      // happen anyway.
+    }, new AbortController().signal)
+    json(res, 200, { ok: true })
+  } catch (error) {
+    // The host's own words are the whole message. "resume failed for session
+    // "…": … is already owned by an active write handle" tells the user to stop
+    // whatever else is driving that session; "send failed" would not.
+    promptError(res, 'prompt-failed', messageOf(error))
+  }
+}
+
+/**
+ * Read and parse a JSON request body under a ceiling.
+ *
+ * The oversize case deliberately does not destroy the request the way the other
+ * desktop routes do. Those stream large payloads and gain nothing by draining
+ * one; this route exists to answer a small JSON failure the shell can read, and
+ * a reset socket would be indistinguishable from the host being down.
+ * @param {import('node:http').IncomingMessage} req - the request to drain.
+ * @returns {Promise<unknown>} the parsed body, or an empty object when there was none.
+ */
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    /** @type {Buffer[]} */
+    const chunks = []
+    let size = 0
+    let refused = false
+    req.on('data', (chunk) => {
+      // Once refused, keep consuming without buffering: the request still has
+      // to be drained for the response to go out.
+      if (refused) return
+      size += chunk.length
+      if (size > MAX_BODY_BYTES) {
+        refused = true
+        chunks.length = 0
+        reject(new Error(`request body exceeds ${MAX_BODY_BYTES} bytes`))
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      if (refused) return
+      const text = Buffer.concat(chunks).toString('utf8')
+      if (text.trim() === '') {
+        resolve({})
+        return
+      }
+      try {
+        resolve(JSON.parse(text))
+      } catch {
+        reject(new Error('request body is not JSON'))
+      }
+    })
+    req.on('error', reject)
+  })
 }
 
 /**
@@ -231,17 +597,8 @@ function snapshot(store) {
   if (view === undefined) {
     return { activity: 'idle', sessionId: null, title: null, tool: null, turn: null, lastEnd: null, updatedAt: now }
   }
-  // A finished turn is shown for a while and then the pet settles, so the face
-  // is not stuck reporting something that happened minutes ago.
-  let activity = view.activity
-  if (activity === ACTIVITY.done && view.lastEnd !== null && now - view.lastEnd.at > DONE_LINGER_MS) {
-    activity = ACTIVITY.idle
-  }
-  if (activity === ACTIVITY.error && view.lastEnd !== null && now - view.lastEnd.at > ERROR_LINGER_MS) {
-    activity = ACTIVITY.idle
-  }
   return {
-    activity,
+    activity: activityAt(view, now),
     sessionId: view.id,
     title: view.title,
     tool: view.tool,
@@ -250,6 +607,73 @@ function snapshot(store) {
     sessionCount: store.sessions.size,
     updatedAt: now,
   }
+}
+
+/**
+ * The activity a session view reports right now.
+ *
+ * A finished turn is shown for a while and then the pet settles, so neither the
+ * face nor the picker is stuck reporting something that happened minutes ago.
+ * One definition, because the two must not disagree about the same session.
+ * @param {object} view - the session view.
+ * @param {number} now - the moment to project at.
+ * @returns {string} one of {@link ACTIVITY}.
+ */
+function activityAt(view, now) {
+  if (view.lastEnd === null) return view.activity
+  if (view.activity === ACTIVITY.done && now - view.lastEnd.at > DONE_LINGER_MS) return ACTIVITY.idle
+  if (view.activity === ACTIVITY.error && now - view.lastEnd.at > ERROR_LINGER_MS) return ACTIVITY.idle
+  return view.activity
+}
+
+/**
+ * A session header's creation time.
+ * @param {object | null} header - a session header, when one is known.
+ * @returns {number} epoch milliseconds, or 0 when the header carries none.
+ */
+function createdAtOf(header) {
+  return typeof header?.createdAt === 'number' ? header.createdAt : 0
+}
+
+/**
+ * Look up a service this plugin does not inject.
+ *
+ * Only `webServer` is required: the pet has to answer on a host composed
+ * without a session controller or a query backend, just with less to say.
+ * `ctx.get` throws for a service this context cannot reach, so the lookup
+ * itself is what gets guarded.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ * @param {string} name - the service name.
+ * @returns {object | null} the service, or null when it is not mounted.
+ */
+function service(ctx, name) {
+  try {
+    return ctx.get(name) ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Answer a refused prompt.
+ * @param {import('node:http').ServerResponse} res - the response.
+ * @param {string} code - a stable, machine-readable reason.
+ * @param {string} message - what to show the user.
+ */
+function promptError(res, code, message) {
+  json(res, 200, { ok: false, error: { code, message } })
+}
+
+/**
+ * The message from an unknown throwable.
+ *
+ * The host's own words are passed through on purpose: a caller can act on
+ * "already owned by an active write handle", not on "send failed".
+ * @param {unknown} error - the thrown value.
+ * @returns {string} a message for the UI.
+ */
+function messageOf(error) {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /**

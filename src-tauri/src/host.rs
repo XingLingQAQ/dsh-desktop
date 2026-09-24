@@ -25,6 +25,66 @@ pub struct HostProcess {
     events: Receiver<HostEvent>,
     /// True when this process was spawned by us (we own its lifecycle).
     pub owned: bool,
+    /// Handle to the kill-on-close job the child was placed in, as a raw value.
+    ///
+    /// Held for the life of the process and deliberately **never closed**: the
+    /// close is what triggers the kill, so the handle going away when this
+    /// process dies is the entire mechanism. Stored as `isize` rather than a
+    /// handle type because raw pointers are not `Send` and this struct is shared
+    /// across threads.
+    #[cfg(windows)]
+    job: Option<isize>,
+}
+
+/// Put a spawned child in a job that kills it when this process dies.
+///
+/// The shell already terminates the host on `RunEvent::Exit`, but that handler
+/// does not run when the process is force-killed — from Task Manager, or in a
+/// crash. The host then survives as an orphan and keeps holding the session
+/// write leases, so the next launch can list sessions but not send to them:
+/// `SessionAlreadyOwnedError`. Twelve such orphans were found on this machine,
+/// the oldest four days old, and the symptom ("sending does nothing") is a long
+/// way from the cause.
+///
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` moves that to the kernel: when the last
+/// handle to the job closes — which the OS does when this process ends, however
+/// it ends — everything in the job is terminated. No cleanup code has to run,
+/// which is exactly the property that was missing.
+///
+/// Returns the job handle to keep open, or `None` if the job could not be set up
+/// (nested jobs are refused in some configurations). A `None` here is not fatal:
+/// the ordinary kill-on-exit path still applies, this only covers the rude exits.
+#[cfg(windows)]
+fn adopt_into_kill_on_close_job(child: &Child) -> Option<isize> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &mut info as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *mut core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if configured == 0 {
+            return None;
+        }
+        let process = child.as_raw_handle() as *mut core::ffi::c_void;
+        if AssignProcessToJobObject(job, process) == 0 {
+            return None;
+        }
+        Some(job as isize)
+    }
 }
 
 impl HostProcess {
@@ -106,11 +166,24 @@ impl HostProcess {
             });
         }
 
+        // Adopt before returning, so there is no window in which the child is
+        // alive and unprotected.
+        #[cfg(windows)]
+        let job = adopt_into_kill_on_close_job(&child);
+        #[cfg(windows)]
+        if job.is_none() {
+            eprintln!(
+                "dsh-desktop: 未能把宿主放进 job 对象；强杀本进程会留下孤儿宿主"
+            );
+        }
+
         Ok(Self {
             child: Some(child),
             pid: Some(pid),
             events: rx,
             owned: true,
+            #[cfg(windows)]
+            job,
         })
     }
 
@@ -247,6 +320,24 @@ pub fn probe_existing(port: u16) -> bool {
 /// A plugin route is not behind the host's token (only the app shell is), so the
 /// URL here is the bare origin plus the path.
 pub fn http_get_body(url: &str) -> Option<String> {
+    http_request("GET", url, None)
+}
+
+/// POST a JSON body to a loopback URL and return the response body.
+///
+/// Same minimal transport as the GET, plus a body and the headers it needs. Used
+/// by the pet's bubble to send a prompt and to switch the session it reports on.
+pub fn http_post_json(url: &str, body: &str) -> Option<String> {
+    http_request("POST", url, Some(body))
+}
+
+/// One minimal HTTP/1.0 exchange against loopback.
+///
+/// `Connection: close` is what makes this simple: the response ends at EOF, so
+/// there is no framing to parse. Only the status line and the body are used —
+/// the headers are skipped, because every caller here wants JSON and nothing
+/// else, and a caller that needs a header would be better served by a real client.
+fn http_request(method: &str, url: &str, body: Option<&str>) -> Option<String> {
     let parsed = url.strip_prefix("http://")?;
     let (host, rest) = parsed.split_once(':')?;
     let (port_part, path) = match rest.split_once('/') {
@@ -258,13 +349,24 @@ pub fn http_get_body(url: &str) -> Option<String> {
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
-    let request = format!(
-        "GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
-    );
+
+    let mut request = format!("{method} {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n");
+    if let Some(body) = body {
+        // Byte length, not character count: a prompt in Chinese is longer in
+        // bytes than in characters, and a short `Content-Length` truncates it
+        // mid-character.
+        request.push_str("Content-Type: application/json; charset=utf-8\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
+    if let Some(body) = body {
+        request.push_str(body);
+    }
     stream.write_all(request.as_bytes()).ok()?;
+
     let mut raw = Vec::new();
     // A cap, so a route that answers with something enormous cannot make the
-    // shell allocate without bound. The state document is well under this.
+    // shell allocate without bound. These documents are well under this.
     let mut chunk = [0u8; 4096];
     loop {
         match stream.read(&mut chunk) {
@@ -280,8 +382,8 @@ pub fn http_get_body(url: &str) -> Option<String> {
     }
     let text = String::from_utf8_lossy(&raw).into_owned();
     let (head, body) = text.split_once("\r\n\r\n")?;
-    // Only a 2xx carries state; anything else is the host saying no, and the
-    // caller should treat that as "no state" rather than parse an error page.
+    // Only a 2xx carries a result; anything else is the host saying no, and the
+    // caller should treat that as "no answer" rather than parse an error page.
     let status_ok = head
         .lines()
         .next()
