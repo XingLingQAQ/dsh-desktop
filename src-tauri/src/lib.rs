@@ -13,6 +13,7 @@ mod bridge;
 mod discover;
 mod host;
 mod pet;
+mod pet_files;
 mod plugin_state;
 mod plugins;
 mod provision;
@@ -453,12 +454,18 @@ fn start_pet_state_watch(app: tauri::AppHandle) {
 /// transcript. The bubble answers "what is it doing", and anything that needs
 /// scrolling belongs in the main window.
 ///
-/// The height is set by the *failure* path rather than the happy one: a refusal
-/// from the host (`SessionAlreadyOwnedError`, and friends) runs to about three
-/// lines at this width, and a failure message that has to be hovered to be read
-/// is a failure message nobody reads.
+/// The height is the **worst case**, not the common one. The card inside is
+/// bottom-anchored and `min-height: 172px`, so an empty bubble renders exactly as
+/// it did before this grew — and when files are queued the card grows *upward*
+/// into the top of the window, away from the pet. 235 is what it takes for a
+/// three-row file list plus a two-line refusal to fit without clipping; at 172 the
+/// top 63px would be cut off by the page's `overflow: hidden`.
+///
+/// The cost is that the top of the window is transparent but still swallows
+/// clicks, since these windows do not click through. Resizing on demand would
+/// avoid that and needs new Rust; a fixed size that is always big enough does not.
 const PET_BUBBLE_WIDTH: f64 = 268.0;
-const PET_BUBBLE_HEIGHT: f64 = 172.0;
+const PET_BUBBLE_HEIGHT: f64 = 235.0;
 
 /// The most recent session-state document.
 ///
@@ -590,6 +597,47 @@ fn pet_select_session(app: tauri::AppHandle, session_id: String) -> Result<Strin
         .to_string())
 }
 
+/// Tell every window what the file queue now holds.
+///
+/// Broadcast rather than sent to the bubble alone: the pet window also shows a
+/// count, and it is visible when the bubble is not.
+fn emit_queue(app: &tauri::AppHandle, view: &pet_files::QueueView) {
+    if let Ok(text) = serde_json::to_string(view) {
+        let _ = app.emit("pet-queue", text);
+    }
+}
+
+/// Add dropped paths to the pet's file queue.
+#[tauri::command]
+fn pet_add_files(app: tauri::AppHandle, paths: Vec<String>) -> usize {
+    let view = pet_files::add(&paths);
+    emit_queue(&app, &view);
+    view.count
+}
+
+/// The pet's file queue.
+#[tauri::command]
+fn pet_queue() -> String {
+    serde_json::to_string(&pet_files::view())
+        .unwrap_or_else(|_| "{\"count\":0,\"files\":[]}".to_string())
+}
+
+/// Drop one path from the queue.
+#[tauri::command]
+fn pet_remove_file(app: tauri::AppHandle, path: String) -> usize {
+    let view = pet_files::remove(&path);
+    emit_queue(&app, &view);
+    view.count
+}
+
+/// Empty the queue.
+#[tauri::command]
+fn pet_clear_files(app: tauri::AppHandle) -> usize {
+    let view = pet_files::clear();
+    emit_queue(&app, &view);
+    view.count
+}
+
 /// Send a prompt into a session from the pet's bubble.
 ///
 /// Always resolves with the host's own JSON (`{"ok":true}` or
@@ -597,11 +645,32 @@ fn pet_select_session(app: tauri::AppHandle, session_id: String) -> Result<Strin
 /// promise. The refusal carries the reason — a real one is
 /// `SessionAlreadyOwnedError` — and the bubble renders that text, so it has to
 /// survive the trip. Only a transport failure becomes an `Err`.
+///
+/// `files` are absolute local paths; the host turns them into prompt content
+/// parts. The queue is emptied **only** on acceptance: a refusal usually has a
+/// fixable cause, and clearing first would throw the user's files away in
+/// exchange for an error message.
 #[tauri::command]
-fn pet_send_prompt(app: tauri::AppHandle, session_id: String, text: String) -> Result<String, String> {
+fn pet_send_prompt(
+    app: tauri::AppHandle,
+    session_id: String,
+    text: String,
+    files: Option<Vec<String>>,
+) -> Result<String, String> {
+    let files = files.unwrap_or_default();
     let url = format!("{}/dsh-desktop-pet/prompt", pet_host_origin(&app)?);
-    let body = json!({ "sessionId": session_id, "text": text }).to_string();
-    host::http_post_json(&url, &body).ok_or_else(|| "发不出去：宿主没有响应".to_string())
+    let body = json!({ "sessionId": session_id, "text": text, "files": files }).to_string();
+    let answer =
+        host::http_post_json(&url, &body).ok_or_else(|| "发不出去：宿主没有响应".to_string())?;
+    let accepted = serde_json::from_str::<serde_json::Value>(&answer)
+        .ok()
+        .and_then(|value| value.get("ok").and_then(|ok| ok.as_bool()))
+        == Some(true);
+    if accepted && !files.is_empty() {
+        let view = pet_files::clear();
+        emit_queue(&app, &view);
+    }
+    Ok(answer)
 }
 
 /// Where the DSH host is listening, without the auth token.
@@ -1875,6 +1944,10 @@ pub fn run() {
             pet_sessions,
             pet_select_session,
             pet_send_prompt,
+            pet_add_files,
+            pet_queue,
+            pet_remove_file,
+            pet_clear_files,
             open_settings,
             quit_app,
             retry_launch
@@ -2042,6 +2115,9 @@ pub fn run() {
             if let Err(error) = prepare_pet_bubble(app.handle()) {
                 eprintln!("dsh-desktop: prepare pet bubble failed: {error}");
             }
+            // 上次没发出去的文件还在队列里——先读回来，并顺手丢掉已经被移动或删除的
+            // 那些（留着只会让"发送"以一个用户看不到的文件为由失败）。
+            pet_files::load();
 
             // 关闭主窗口时：若开启“关闭到托盘”，则隐藏而不是退出。
             if let Some(main) = app.get_window("main") {
@@ -2070,8 +2146,31 @@ pub fn run() {
             if let Some(pet_window) = app.get_webview_window(pet::PET_LABEL) {
                 let pet_handle = app.handle().clone();
                 pet_window.on_window_event(move |event| {
-                    if let WindowEvent::Moved(_) = event {
-                        pet::remember_position(&pet_handle);
+                    match event {
+                        WindowEvent::Moved(_) => pet::remember_position(&pet_handle),
+                        // Files dropped on the pet. This arrives in Rust rather
+                        // than in the page because the window is transparent and
+                        // 132px wide: a drop target that small is easier to get
+                        // right at the window level, and it keeps working when
+                        // the page is busy re-rendering the pet's face.
+                        WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
+                            let paths: Vec<String> = paths
+                                .iter()
+                                .map(|p| p.to_string_lossy().into_owned())
+                                .collect();
+                            let view = pet_files::add(&paths);
+                            emit_queue(&pet_handle, &view);
+                            let _ = pet_handle.emit("pet-drag", false);
+                        }
+                        // A 132px target needs to say it noticed the drag, or
+                        // the gesture feels like aiming at nothing.
+                        WindowEvent::DragDrop(tauri::DragDropEvent::Enter { .. }) => {
+                            let _ = pet_handle.emit("pet-drag", true);
+                        }
+                        WindowEvent::DragDrop(tauri::DragDropEvent::Leave) => {
+                            let _ = pet_handle.emit("pet-drag", false);
+                        }
+                        _ => {}
                     }
                 });
             }

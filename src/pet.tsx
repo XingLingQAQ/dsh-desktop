@@ -80,6 +80,10 @@ function moodOf(state: SessionState | null): Mood {
 function Pet() {
   const [session, setSession] = useState<SessionState | null>(null);
   const [poking, setPoking] = useState(false);
+  /** True while a drag is hovering the pet, so it can say it noticed. */
+  const [dragOver, setDragOver] = useState(false);
+  /** How many files are waiting to be sent, shown as a badge. */
+  const [queued, setQueued] = useState(0);
   // The blink timer is cleared on unmount, and the reaction's timer is too — a
   // transparent always-on-top window that keeps waking up to flip a class is a
   // battery cost for no visible benefit.
@@ -108,9 +112,46 @@ function Pet() {
         // Ignore: the next tick will send a fresh snapshot.
       }
     });
+    const unDrag = listen<boolean>("pet-drag", (event) => {
+      setDragOver(event.payload === true);
+    });
+    const unQueue = listen<string>("pet-queue", (event) => {
+      try {
+        const parsed = JSON.parse(event.payload) as { count?: number };
+        setQueued(typeof parsed?.count === "number" ? parsed.count : 0);
+      } catch {
+        // Ignore: the badge keeps its last value.
+      }
+    });
+    // Read the queue once, in case files were dropped before this page loaded.
+    void invoke<string>("pet_queue")
+      .then((raw) => {
+        const parsed = JSON.parse(raw) as { count?: number };
+        setQueued(typeof parsed?.count === "number" ? parsed.count : 0);
+      })
+      .catch(() => {});
     return () => {
       unTheme.then((fn) => fn());
       unState.then((fn) => fn());
+      unDrag.then((fn) => fn());
+      unQueue.then((fn) => fn());
+    };
+  }, []);
+
+  useEffect(() => {
+    // Belt and braces. Tauri intercepts drops at the window level and reports
+    // them in Rust, so the page should never see one — but the browser's default
+    // for a dropped file is to *navigate to it*, which would replace the pet with
+    // a text file and leave no way back. Preventing it costs nothing and removes
+    // that failure mode entirely.
+    const stop = (event: DragEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener("dragover", stop);
+    window.addEventListener("drop", stop);
+    return () => {
+      window.removeEventListener("dragover", stop);
+      window.removeEventListener("drop", stop);
     };
   }, []);
 
@@ -174,13 +215,13 @@ function Pet() {
   const label = useMemo(() => describe(session), [session]);
 
   return (
-    <div className="pet-root" data-mood={mood}>
+    <div className="pet-root" data-mood={mood} data-drag={dragOver ? "over" : "off"}>
       {/* The whole body is the drag handle and the poke target. */}
       <div
         className="pet-body"
         role="button"
         tabIndex={0}
-        aria-label={`桌面宠物。${label}拖动可移动，点击查看详情，右键打开菜单`}
+        aria-label={`桌面宠物。${label}${queued > 0 ? `有 ${queued} 个文件待发送。` : ""}拖动可移动，点击查看详情，右键打开菜单，可以把文件拖到它身上`}
         title={label}
         onMouseDown={startDrag}
         onContextMenu={(event) => {
@@ -196,6 +237,9 @@ function Pet() {
         }}
       >
         <div className="pet-shadow" aria-hidden="true" />
+        {/* A ring that only exists while a drag is overhead: a 132px target has
+            to acknowledge the gesture or it feels like aiming at nothing. */}
+        <div className="pet-drop-ring" aria-hidden="true" />
         <div className="pet-figure" aria-hidden="true">
           <div className="pet-ear pet-ear-left" />
           <div className="pet-ear pet-ear-right" />
@@ -222,6 +266,13 @@ function Pet() {
           <span />
           <span />
         </div>
+        {/* How many files are waiting. Only rendered when there are any, so the
+            pet is unchanged for someone who never drops one. */}
+        {queued > 0 && (
+          <div className="pet-queue-badge" title={`${queued} 个文件待发送`}>
+            {queued}
+          </div>
+        )}
       </div>
     </div>
   );

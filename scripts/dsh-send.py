@@ -117,11 +117,16 @@ def main():
           const composer = document.querySelector('div[contenteditable=true]');
           if (!composer) return null;
           const box = composer.getBoundingClientRect();
+          // Prefer the composer's own primary class over any `_primary` on the
+          // page: a generic match has picked a different button often enough that
+          // a send silently not happening was mistaken for a host problem twice.
+          const exact = document.querySelector('button.uV2eYG_primary');
+          const candidates = exact ? [exact] : [...document.querySelectorAll('button')];
           let best = null;
-          document.querySelectorAll('button').forEach((b) => {
+          candidates.forEach((b) => {
             const r = b.getBoundingClientRect();
             if (r.width === 0) return;
-            const primary = String(b.className).includes('primary');
+            const primary = exact ? true : String(b.className).includes('primary');
             const below = r.y > box.y;
             const near = Math.abs((r.y + r.height / 2) - (box.y + box.height));
             if (primary && below && (best === null || near < best.near)) {

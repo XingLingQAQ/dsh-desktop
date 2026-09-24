@@ -33,9 +33,17 @@
  * it has to be able to say which sessions exist and to put a message into one.
  * Both read the same event-derived state as `/state` — the picker shows the
  * activity the pet's face is showing rather than a second opinion about it.
+ *
+ * `/prompt` also carries files, and that path is not what it looks like: a
+ * prompt cannot name a local path. The only file part the prompt contract takes
+ * is an upload receipt, so a path is streamed through the host's file-upload
+ * service first and the receipt is what the message cites. See {@link uploadPart}.
  */
 
 import { randomUUID } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { basename, isAbsolute } from 'node:path'
 
 export const name = 'dsh-desktop-pet'
 
@@ -74,6 +82,17 @@ const MAX_SESSIONS = 30
  * A prompt is text; anything approaching this is a caller mistake.
  */
 const MAX_BODY_BYTES = 64 * 1024
+
+/**
+ * How many files one prompt may carry.
+ *
+ * A desktop bubble is a one-line composer, not a batch tool. Each file costs a
+ * durable store write, a staged receipt on the session, and a handle line in
+ * the message the model reads, so a large selection is both a different kind of
+ * action than "attach this" and a way to spend a session's context on handles.
+ * Ten is past the point where a selection still reads as deliberate.
+ */
+const MAX_PROMPT_FILES = 10
 
 /**
  * Activity values the pet can be in.
@@ -502,9 +521,19 @@ async function servePrompt(req, res, ctx) {
     promptError(res, 'invalid-request', 'sessionId is required')
     return
   }
-  // Only the emptiness check trims: the message itself is sent as typed.
-  if (text.trim() === '') {
-    promptError(res, 'invalid-request', 'text is required')
+  let files
+  try {
+    files = await localFiles(body?.files)
+  } catch (error) {
+    promptError(res, 'invalid-request', messageOf(error))
+    return
+  }
+  // Only the emptiness check trims: the message itself is sent as typed. The
+  // rule now binds on both fields at once, because attaching a file with no
+  // words is a complete thought — but a caller that never sends `files` still
+  // gets the message it always got.
+  if (text.trim() === '' && files.length === 0) {
+    promptError(res, 'invalid-request', body?.files === undefined ? 'text is required' : 'text or files is required')
     return
   }
   // The controller rather than `agents.get(id).followup(…)`: it resumes the
@@ -515,6 +544,29 @@ async function servePrompt(req, res, ctx) {
     promptError(res, 'unavailable', 'the session controller is not loaded in this host')
     return
   }
+  // Text first, so the model reads the request before the handles it names. A
+  // whitespace-only message alongside files is dropped rather than sent: the
+  // host accepts it, but it would only add an empty block to the log.
+  const content = text.trim() === '' ? [] : [{ type: 'text', text }]
+  if (files.length > 0) {
+    const uploads = service(ctx, 'fileUploads')
+    if (uploads === null) {
+      // Refused rather than degraded to a mention in the text: the caller asked
+      // for the file itself, and silently sending the path instead would look
+      // like it worked.
+      promptError(res, 'unavailable', 'the file upload service is not loaded in this host, so files cannot be attached')
+      return
+    }
+    try {
+      for (const path of files) content.push(await uploadPart(uploads, sessionId, path))
+    } catch (error) {
+      // The upload service's own words, for the same reason as the prompt
+      // failure below: it names the limit or scope that refused the file, and
+      // this route has no way to know which.
+      promptError(res, 'prompt-failed', messageOf(error))
+      return
+    }
+  }
   try {
     await controller.prompt({
       // The inbox keys on `requestId` and rejects a repeat, so it has to be
@@ -524,7 +576,7 @@ async function servePrompt(req, res, ctx) {
       // The pet has no way to ask for a steer, and queueing is the
       // non-destructive default: a steer would cut into a running turn.
       mode: 'queue',
-      content: [{ type: 'text', text }],
+      content,
       // Deliberately never aborted. The prompt is the user's intent rather than
       // the poll, and `prompt` only consults the signal before it starts — so
       // tying it to this socket would advertise a cancellation that would not
@@ -536,6 +588,83 @@ async function servePrompt(req, res, ctx) {
     // "…": … is already owned by an active write handle" tells the user to stop
     // whatever else is driving that session; "send failed" would not.
     promptError(res, 'prompt-failed', messageOf(error))
+  }
+}
+
+/**
+ * Turn the request's `files` field into local paths this host can read.
+ *
+ * Every path is checked here, before a single byte is stored, because the
+ * checks are not free later: the upload service stages each receipt against the
+ * session and only a *delivered* prompt retires them, so a bad path discovered
+ * halfway through a batch would leave the earlier files staged on a session
+ * that never sent them. Refusing while refusing is free is the whole design.
+ * @param {unknown} value - the request's `files` field.
+ * @returns {Promise<string[]>} absolute paths to existing regular files, in request order.
+ * @throws {Error} naming the first field or path that cannot be used.
+ */
+async function localFiles(value) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) throw new Error('files must be an array of absolute paths')
+  if (value.length > MAX_PROMPT_FILES) {
+    throw new Error(`files must hold at most ${MAX_PROMPT_FILES} paths`)
+  }
+  const paths = []
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.trim() === '') {
+      throw new Error('files must be an array of absolute paths')
+    }
+    // Relative paths are refused rather than resolved. The host's cwd is the
+    // harness's, not the shell's, so "resolving" one here would silently attach
+    // a different file than the caller meant — and a wrong file is worse than a
+    // refusal, because nothing downstream can tell.
+    if (!isAbsolute(entry)) throw new Error(`file path must be absolute: ${entry}`)
+    let info
+    try {
+      info = await stat(entry)
+    } catch {
+      throw new Error(`file does not exist: ${entry}`)
+    }
+    // A directory carries no bytes, and a device or socket has no end to read
+    // to; the store would happily take the first and hang on the second.
+    if (!info.isFile()) throw new Error(`not a file: ${entry}`)
+    paths.push(entry)
+  }
+  return paths
+}
+
+/**
+ * Store one local file for a session and return the prompt part that cites it.
+ *
+ * This indirection is the point of the route. `PromptContentPart` has no local
+ * path variant — its only file form is `{type:'file', receiptId}`, an opaque
+ * receipt minted by a preceding upload on that same session — so the bytes go
+ * into the upload service first and the receipt is what the prompt carries. The
+ * model then receives a handle line naming the stored read-only copy, not the
+ * path the user picked, which is also why the display name has to be sent: the
+ * stored leaf name is sanitized from it.
+ * @param {object} uploads - the host `fileUploads` service.
+ * @param {string} sessionId - the session the receipt will belong to.
+ * @param {string} path - an absolute path to an existing regular file.
+ * @returns {Promise<{type: 'file', receiptId: string}>} the prompt content part.
+ */
+async function uploadPart(uploads, sessionId, path) {
+  const stream = createReadStream(path)
+  try {
+    // A Node read stream is already an async byte iterable, so the store reads
+    // bounded chunks under backpressure instead of holding the whole file in
+    // this process. Files have no admission limits, so nothing else bounds it.
+    const { receiptId } = await uploads.uploadStream({
+      sessionId,
+      data: stream,
+      name: basename(path),
+    })
+    return { type: 'file', receiptId }
+  } catch (error) {
+    // The store abandons the stream the moment it throws, and an abandoned
+    // descriptor stays open until GC; close it while the failure is in hand.
+    stream.destroy()
+    throw error
   }
 }
 

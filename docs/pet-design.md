@@ -257,7 +257,7 @@ turn/start(seq 4) → step/start → system/message → user/message → request
 | **0** | 验 §5 那三条（能不能列会话 / 发消息 / 订阅回合） | ✅ **已实测通过**（见 §5） |
 | **2** | 气泡 + 状态反映（思考中/完成/出错） | ✅ **已完成**（见 §12） |
 | **3** | 宿主半插件 + 发消息 + 会话切换 | ✅ **已完成**（见 §13） |
-| **4** | 文件接住 + 队列 + 喂给会话 | 未开始 |
+| **4** | 文件接住 + 队列 + 喂给会话 | ✅ **已完成**（见 §14） |
 | **5** | 投喂/养成（可选） | 未开始 |
 
 第 2 期原本排在验 §5 之前，现在两条都通了。**先做第 2 期**：它只依赖壳内的
@@ -462,6 +462,86 @@ SessionAlreadyOwnedError: session "..." is already owned by an active write hand
 
 **完整闭环**：在气泡里选中一个会话 → 从宠物发一句话 → 回合跑起来 → 学到标题
 （`title: "probe-ui: 只回复 ok"`）→ 状态与表情跟上（`lastEnd: {kind:"error", code:"SERVER"}`）。
+
+---
+
+## 14. 第 4 期：文件接住 + 队列 + 喂给会话
+
+### 14.1 一个必须先查清的问题：prompt 到底怎么带文件
+
+**答案和直觉相反：契约里根本没有"本地路径"这种东西。**
+
+`PromptContentPart` 只有三个变体（`dsh-api-session-controller/lib/types/types.d.ts`）：
+
+```ts
+| { type: 'text';  text: string }
+| { type: 'image'; mediaType: ImageMediaType; data: string; name?: string }
+| { type: 'file';  receiptId: Branded<'file-upload-receipt-id'> }
+```
+
+`file` 那个变体带的是一张**不透明收据**（"Host-minted authority for one staged file
+upload in one Agent scope"），不是路径。所以真实流程是**先上传、再引用收据**：
+
+```js
+const handle = await ctx.get('fileUploads').uploadStream({ sessionId, data, name })
+// → 收据
+content.push({ type: 'file', receiptId: handle.receiptId })
+```
+
+收据是**按会话**授权的（`stagedFiles = new WeakMap()`，键是 `agent.session`），
+拿别人的收据会 `FILE_NOT_STAGED`。
+
+**顺带排除一个诱人的错误答案**：`dsh-file-reference` 从名字看很像，但它只是 `@` 提及的
+自动补全（返回 `{path, kind}`），注入的是**文本**——正是"仅仅提一句"那种我们不要的效果。
+
+### 14.2 实现
+
+| 层 | 东西 |
+|---|---|
+| `src-tauri/src/pet_files.rs` | 队列本体：去重、校验、落盘、启动时丢弃已被移动/删除的条目 |
+| `src-tauri/src/lib.rs` | 宠物窗口的 `DragDrop` 事件 → 入队 → 广播 `pet-queue`；四个命令 |
+| 宿主 | `POST /prompt` 增加 `files: string[]`：逐个 `stat` → `createReadStream` → `uploadStream` → 组块 |
+| `src/pet.tsx` | 投放提示圈 + 待发送角标；并 `preventDefault` 掉浏览器的默认行为 |
+| `src/pet-bubble.tsx` | 文件列表（中间截断、保留扩展名）+ 逐个删除 + 清空 + 带文件发送 |
+
+**几个刻意的选择**：
+
+- **校验全部前置**。只有"被投递的 prompt"才会让收据失效，所以一批文件传到一半失败会
+  留下孤儿收据。因此所有路径在**写第一个字节之前**全部检查完（绝对路径、存在、是普通文件）。
+  相对路径**拒绝而不是解析**——宿主的 cwd 是 harness 的，解析会静默换成另一个文件。
+- **图片按普通文件走，不用 `image` 变体**。`image` 要求 base64 进请求体（毁掉流式，
+  也和 64KiB 体积上限冲突），而且宿主会按模型模态拦截，不支持就直接拒掉整个 prompt。
+  代价要说清楚：**通过 `files` 附上的 `a.png` 会变成一条句柄，模型用文件工具去读，
+  不是内联视觉。**
+- **队列只在宿主接受后才清空**。拒绝通常是有原因、可修的（比如会话被占用），
+  先清空等于拿用户的文件换一条错误信息。
+- **气泡窗口高度 172 → 235**。卡片是**底部对齐、向上生长**的：空的时候和以前逐像素相同，
+  有文件时向上长、远离宠物。235 是"三行文件 + 两行失败信息"不裁切所需的值；停在 172 会把
+  顶部 63px 裁掉。
+
+### 14.3 实测过的
+
+| 项 | 结果 |
+|---|---|
+| 真实文件上传 | **`{"ok":true}`** —— 证明 `fileUploads` 服务在这个发行版里确实挂载了 |
+| 路径不存在 | `invalid-request`，消息里点名是哪个路径 |
+| 相对路径 | `invalid-request`：`file path must be absolute: relative.txt` |
+| 目录 | `invalid-request`：`not a file: …` |
+| 不带 files（旧路径） | `{"ok":true}`，行为不变 |
+| 气泡渲染队列 | 文件名、大小、`2 个文件 · 906 B`、清空按钮都在 |
+| 带文件发送 | `{"ok":true}` → 队列**自动清空** → 宿主 `activity=thinking, turn=2` |
+
+### 14.4 没验的
+
+- **OS 级拖放本身**。CDP 的合成拖拽（`Input.dispatchDragEvent`）到不了 Tauri 的
+  `DragDrop` 事件——实测拖完队列仍是 0。这台机器的会话没有交互桌面，也没法从资源管理器
+  真拖一个文件。所以**处理函数背后的命令验过了，OS 把事件送到处理函数这一步没有**。
+  作为补偿，宠物页面把 `dragover`/`drop` 的默认行为 `preventDefault` 掉了：万一 Tauri
+  那一层没拦住，浏览器的默认行为是**导航到被拖入的文件**，宠物窗口会变成一个文本文件，
+  而且没有退路。这一层防的不是"功能不工作"，是"功能不工作时很难看"。
+- **模型侧最终看到的那行句柄文本**。宿主接受了、回合跑起来了，但 `fileHandleText` 生成的
+  实际文本没有观察到（会话日志是 zstd 压缩的，这台机器上没有可用的解压模块）。
+
 
 
 

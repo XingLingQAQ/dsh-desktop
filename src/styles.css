@@ -2110,6 +2110,51 @@ html.pet-window body {
   }
 }
 
+/* ── 接住文件 ────────────────────────────────────────────────────────
+ *
+ * 宠物只有 132px 宽，而且透明窗口不做点击穿透——所以它是一个很小的落点。小落点
+ * 更需要**明确承认**这一下，否则拖过去的感觉像是往空气里扔东西。
+ *
+ * 反馈只用一个虚线圈，不铺大色块：宠物本体是透明的，铺一块底色会把它变成一个
+ * 面板，那就不是宠物了。
+ */
+.pet-drop-ring {
+  position: absolute;
+  inset: 6px 4px 4px 4px;
+  border-radius: 44px;
+  border: 2px dashed var(--pet-hi);
+  opacity: 0;
+  transform: scale(0.92);
+  transition: opacity 0.14s ease, transform 0.14s ease;
+  /* 圈只是画出来的，不能挡住宠物本体的拖动/点击。 */
+  pointer-events: none;
+}
+
+.pet-root[data-drag='over'] .pet-drop-ring {
+  opacity: 0.9;
+  transform: scale(1);
+}
+
+/* 待发送文件的角标。只在真的有文件时才渲染——没拖过文件的人看到的宠物一点没变。 */
+.pet-queue-badge {
+  position: absolute;
+  right: 0;
+  top: 22px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  background: var(--pet-lo);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
 /* ── 会话状态的表情 ────────────────────────────────────────────────────
  *
  * 宠物的脸跟着当前会话走：思考 / 执行工具 / 等待批准 / 完成 / 出错。
@@ -2336,6 +2381,14 @@ html.pet-window body {
   .pet-busy span {
     opacity: 0.6;
   }
+  /* 投放提示保留淡入（它是"我看见了"的答复），去掉缩放。 */
+  .pet-drop-ring {
+    transform: none;
+    transition: opacity 0.14s ease;
+  }
+  .pet-root[data-drag='over'] .pet-drop-ring {
+    transform: none;
+  }
 }
 
 /* ── 宠物的气泡 ──────────────────────────────────────────────────────
@@ -2347,6 +2400,11 @@ html.pet-window body {
  * ——和更新弹窗同一套，这样它读起来像这个应用的一部分，而不是宠物自己发明的东西。
  *
  * 窗口是透明的，所以圆角背景得画在这张卡片上。
+ *
+ * 卡片不铺满窗口，而是贴住窗口**下沿**、由内容决定高度（下面那条 172 的底线）。
+ * 这一条是为文件队列立的：队列空的时候卡片正好还是 172，一个像素都没变；队列非空
+ * 时它往上长，长出去的部分落在窗口上沿的透明区里。窗口的底边就是宠物的头顶（见
+ * lib.rs 的 show_pet_bubble），所以卡片无论多高都贴着宠物，不会浮在半空。
  */
 html.pet-bubble-window,
 html.pet-bubble-window body {
@@ -2356,8 +2414,14 @@ html.pet-bubble-window body {
 
 .pet-bubble {
   box-sizing: border-box;
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* 172 = 窗口在空队列下的高度，也就是这个功能存在之前那张卡片的高度。这条底线
+     保证空队列时卡片和以前一模一样（内容 110 加内边距 28 才 138，余量照旧归
+     foot），而队列长出来的高度全部加在上面，不挪动已有那几行。 */
+  min-height: 172px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2370,6 +2434,9 @@ html.pet-bubble-window body {
   font-size: 13px;
   line-height: 1.45;
   user-select: none;
+  /* 卡片钉在窗口下沿，入场动画也得从下沿长起来：默认的 center 原点会让底边在动画
+     里先往上飘 2%，而那正是贴着宠物的那一条边。 */
+  transform-origin: bottom center;
   animation: pet-bubble-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -2384,7 +2451,7 @@ html.pet-bubble-window body {
   }
 }
 
-/* 固定高度：下面的三行才是有余量可让的那几行，状态行被压扁的话最先没的是它。 */
+/* 固定高度：下面几行里只有 foot 是有余量可让的，状态行被压扁的话最先没的是它。 */
 .pet-bubble-head {
   flex: none;
   display: flex;
@@ -2437,21 +2504,36 @@ html.pet-bubble-window body {
 
 /* ── 垂直预算 ────────────────────────────────────────────────────────
  *
- * 窗口 268×156，卡片铺满，减掉 14/16 的内边距后内容盒是 236×128。下面每一行都
- * 是按这个数配的：
+ * 窗口 268×235（lib.rs 的 PET_BUBBLE_HEIGHT；**这个数必须跟着改**——卡片长到 235
+ * 而窗口还是 172 的话，html 的 overflow:hidden 会把顶上的 63px 切掉）。卡片铺满宽
+ * 度、贴住下沿，减掉 14/16 的内边距后内容盒最多 236×207。下面每一行都是按这个数
+ * 配的：
  *
- *     head        21   14 号字 × 继承来的 1.45 行高
+ *     head        21   14 号字 × 继承来的 1.45 行高（实际 20.3）
  *     gap          8
- *     picker      22   12.5 号字 18 + 触发区上下各 2
+ *     picker      22   12.5 号字 18 + 触发区上下各 2（实际 22.125）
+ *     gap          8
+ *     files       72   队列行；空队列时这一行不存在（0）
  *     gap          8
  *     composer    28   输入框，发送键同高
  *     gap          8
- *     foot       ≥16   吃掉剩下的 33；两行的报错是 32
+ *     foot       ≥16   吃掉剩下的；两行的报错是 32
  *                ───
- *                 128
+ *                 235   三行文件 + 两行拒绝，最坏情况
  *
- * 余量故意放在最下面的 foot：只有它的内容会变高（提示一行，主机拒绝两行），把
- * 余量给它，上面两行就不会因为多出一行字而整体上移。
+ * 表里的小数上取整了，所以最坏其实是 234.4，235 还剩半像素；宁可留这半像素，也别
+ * 让最后一行被切。三条规则撑着这个数，改任何一条之前先看另外两条：
+ *
+ *  1. **空队列时卡片是 172，一像素都不变。** 空队列的内容只有 110（不含上下 28 的
+ *     内边距），剩下的照旧全归 foot；.pet-bubble 的 min-height 是 172，卡片又贴住
+ *     窗口下沿，所以多出来的高度只会往窗口上沿的透明区里长，不会把卡片顶起来。
+ *     235 是**最坏情况**：三行文件加上两行的主机拒绝，一行都不能被切掉。窗口开在
+ *     这个最坏值上，卡片平时比它矮——透明的那一截谁也看不见，但它照样吃掉鼠标点
+ *     击，这是"空队列外观不变"付的代价。
+ *  2. **foot 是唯一会变高的一行**，所以余量给它：提示一行，主机的拒绝两行。上面几
+ *     行的高度是死的，拒绝出现时它们一动不动。
+ *  3. **只有 picker 的列表和文件队列会滚**，而且都在卡片内部滚。窗口撑不大，比窗
+ *     口还高的弹层等于最后几行被切掉。
  */
 
 /* 会话标题：永远一行。以前是两行截断——现在那一行归输入框了，而且一个两行高的
@@ -2532,8 +2614,10 @@ html.pet-bubble-window body {
   transform: rotate(180deg);
 }
 
-/* 列表朝下展开，方向就是空间决策：触发区在 156 高的窗口里位于 y≈43，下面还有
-   ~87px，上面只有状态行要用的那 43。82 给阴影留了不贴窗口下沿的一点余量。
+/* 列表朝下展开，方向就是空间决策：触发区在空队列的卡片里位于 y≈43（14 上内边距 +
+   21 状态行 + 8 间距），列表从 69 起，而卡片最矮也有 172，下面还有 103px；上面只有
+   状态行要用的那 43。82 给阴影留了不贴窗口下沿的一点余量——文件队列把卡片撑高时
+   余量只会更多，所以按最矮的那种卡片算就永远不会超出去。
    限高 + 滚动，而不是撑开：窗口撑不大，比窗口还高的弹层等于最后几行被切掉。 */
 .pet-bubble-list {
   position: absolute;
@@ -2646,8 +2730,119 @@ html.pet-bubble-window body {
   color: var(--ds-label);
 }
 
+/* ── 文件队列 ────────────────────────────────────────────────────────
+ *
+ * 宠物是投放目标：文件被壳接住、排进队列，这一块只是把队列显示出来。它长在输入框
+ * 上面，因为它就是"这条消息还要带走什么"——贴着发送键才读得通。
+ *
+ * 盒子照输入框的配方（r8、l2 发丝描边、bg-1 底），这样它读起来像一个控件而不是
+ * 一列裸文字。套盒子的代价是每行只剩 22 高：22×3 + 上下内边距 4 + 描边 2 = 72，
+ * 正好是预算里那一行。
+ */
+.pet-bubble-files {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  /* 三行封顶。三个文件以内一个都不用滚，第四行起才滚——此时 foot 上的计数和看得
+     见的行数对不上，那就是"下面还有"的提示（滚动条和这个应用其它列表一样藏着）。 */
+  max-height: 72px;
+  overflow-y: auto;
+  padding: 2px;
+  border: 1px solid var(--ds-border-2);
+  border-radius: 8px;
+  background: var(--ds-bg-1);
+  scrollbar-width: none;
+}
+
+.pet-bubble-files::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 一行一个文件：名字（弹性）、大小、移除。22 高是"行"和"按钮"之间的折中——再矮
+   移除键就没有像样的点击面，再高三行就放不进 72。 */
+.pet-bubble-file {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  /* 左边留出盒子内边距之外的呼吸位；右边不留——移除键是整行高，让它的 hover 面
+     一直贴到行尾，点击面才够大。 */
+  padding: 0 0 0 6px;
+  border-radius: 5px;
+}
+
+/* 名字是这一行里唯一会伸缩的东西，所以宽度由它让。中间截断在 tsx 里已经做完（见
+   shortName），这里只兜底：万一那 24 个显示宽度还是宽了，末尾再省一次，总比把移除
+   键挤出盒子强。 */
+.pet-bubble-fileName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ds-label);
+}
+
+/* 大小比名字小一档：它是顺带看见的，不该和名字抢。数字用等宽字形，一列大小扫下去
+   不用重新找小数点。 */
+.pet-bubble-fileSize {
+  flex: none;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ds-label-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 移除键：整行高、22 宽，平时只有一个灰叉。它做的是破坏性的事，不该比文件名还显
+   眼，所以面只在 hover 时出现；12 的 viewBox 画 8.4 的对角线，和卡片上其它图标同
+   一支笔。 */
+.pet-bubble-fileX {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ds-label-3);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.pet-bubble-fileX svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 1.4;
+}
+
+.pet-bubble-fileX:hover:not(:disabled) {
+  background: var(--ds-hover);
+  color: var(--ds-label);
+}
+
+.pet-bubble-fileX:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* 没有会话时队列里是"停在这儿"，不是"没了"：文件名和大小压暗一档，读起来是待发的
+   而不是在发的——和列表里那个没有活跃句柄的会话同一个信号。移除键和清空照旧能按：
+   从队列里拿掉一个文件不需要会话，那是本地动作，把还能用的东西画成灰的才是撒谎。 */
+.pet-bubble-files[data-idle='yes'] .pet-bubble-fileName,
+.pet-bubble-files[data-idle='yes'] .pet-bubble-fileSize {
+  opacity: 0.55;
+}
+
 /* 输入行，照更新弹窗的 Input 配方：r8、l2 发丝描边、bg-1 底。高度取 28 而不是
-   DSH 的 32——卡片只有 128，这 4px 正好是 foot 第二行的钱。 */
+   DSH 的 32——这张卡片的高度是一分一分算出来的（见开头的预算），这 4px 是预算里
+   真花得出去的钱。 */
 .pet-bubble-compose {
   flex: none;
   display: flex;
@@ -2750,32 +2945,77 @@ html.pet-bubble-window body {
 /* 键盘走到哪儿要看得见；鼠标点不给环，免得点一下留一圈。 */
 .pet-bubble-trigger:focus-visible,
 .pet-bubble-item:focus-visible,
-.pet-bubble-send:focus-visible {
+.pet-bubble-send:focus-visible,
+.pet-bubble-fileX:focus-visible,
+.pet-bubble-clear:focus-visible {
   outline: 2px solid var(--ds-brand);
   outline-offset: 1px;
 }
 
 /* foot 是唯一会变高的一行：提示一行，主机的拒绝两行。它吃掉卡片的余量（见开头
-   的预算），所以拒绝出现时上面的标题和输入行一动不动。 */
+   的预算），所以拒绝出现时上面的标题和输入行一动不动。它现在一行里放两样东西：状态
+   文字，和队列非空时的清空键。 */
 .pet-bubble-foot {
   flex: 1;
   min-height: 16px;
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--ds-label-3);
-  overflow: hidden;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+/* 夹在中间的这一层只为一件事：把 line-clamp 从 flex 项上挪开。line-clamp 只在
+   display:-webkit-box 上生效，而那套老盒模型撞上"flex 项会被块化"这条规则，各引擎
+   给的结果并不一致——多一层 div 换一个确定的行为，值。 */
+.pet-bubble-footClip {
+  flex: 1;
+  min-width: 0;
+}
+
+.pet-bubble-footText {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ds-label-3);
   /* 截断而不是滚动：卡片只有两行的位置，全文在元素的 title 上等着想看完的人。 */
   word-break: break-word;
 }
 
 /* 拒绝原文照登——主机那句话是唯一说得出"接下来该怎么办"的东西——所以给它错误
    色，并允许选中，好让人把这样一条消息带进问题报告里。 */
-.pet-bubble-foot[data-tone='error'] {
+.pet-bubble-foot[data-tone='error'] .pet-bubble-footText {
   color: var(--ds-error);
   user-select: text;
+}
+
+/* 清空：11 号字的纯文字按钮，和它左边那行状态同一个高度，所以两行报错时它跟第一行
+   对齐。它是次要动作——这张卡片上的实心按钮只有一个（发送键），描边又会比旁边的文字
+   重——所以面只在 hover 时出现。 */
+.pet-bubble-clear {
+  flex: none;
+  height: 16px;
+  padding: 0 5px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ds-label-3);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.pet-bubble-clear:hover:not(:disabled) {
+  background: var(--ds-hover);
+  color: var(--ds-label);
+}
+
+.pet-bubble-clear:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2794,7 +3034,9 @@ html.pet-bubble-window body {
      ——一次性淡入正是这套策略放过的东西（见 .upd-notice）。 */
   .pet-bubble-trigger,
   .pet-bubble-caret,
-  .pet-bubble-send {
+  .pet-bubble-send,
+  .pet-bubble-fileX,
+  .pet-bubble-clear {
     transition: none;
   }
   .pet-bubble-trigger[aria-expanded='true'] .pet-bubble-caret {
