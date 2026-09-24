@@ -657,6 +657,87 @@ session "73671091-…" is owned by subagent routing
 - **`/sessions` 的单飞没有超时**：`listSessions()` 若不返回，选择器会一直空着直到插件重载。
 - **插件里的 `sessions` Map 只增不减**；**忙状态不衰减**（只老化 done/error）。
 
+> §16.4 的**多显示器**一条已在下面 §17 修掉（`window_work_area`）。
+
+## 17. 第二次对抗式审查：15 条，全部核过并修了
+
+切了 agent（handover）之后又做了一次对抗式审查，这次 15 条。主题和上次一样——**"测试
+方法本身有盲区"**：绝大多数都是"直接 invoke 命令验，从没走真实路径"漏掉的。每一条的
+DSH 事件/接口契约都**先对着本机在跑的宿主源码核过**（`%APPDATA%\DeepSeek Harness\
+runtime\dsh\node_modules\@deepseek-ai`），不是照记忆猜。修复按**文件切给三个子 agent 并行**
+（读源码是只读、驱动应用要独占，而三个文件集互不相交，所以并行零冲突）：插件半
+`index.js` 一个、Rust 壳 `lib.rs/pet.rs/host.rs` 一个、气泡 UI 两个 tsx 一个。
+
+**整体验证**：`tsc` 干净、`cargo check` 干净（4 条既有 warning，均不在改动处）、Vite 生产
+构建干净。其中**唯一会静默打断壳↔宿主通道的风险**——给所有路由加 `sameOrigin` 会不会
+把壳自己的轮询也挡掉——**静态证伪了**：壳的 `http_request` 只发 `Host`/`Connection`/
+`Content-Type`，**不带 `Origin`**，所以 `sameOrigin` 对壳一律放行，只挡外站页面。
+
+### 17.1 三个功能级的（最要紧）
+
+- **`blocked` 被当成"等待你批准"，而真正的批准根本没接**。DSH 里 `blocked` 是 preStep
+  钩子**否决了这一步、回合已经结束**（`turn/end` 的一种 `reason.kind`），不是在等人。真正
+  的批准是回合**进行中**由 `dsh-user-approval` 追加的 `approval/asked`（带 `toolName`）→
+  `approval/decided`。原来把 `blocked` 映射成 `waiting`，而 `waiting` 又是唯一**永不过期**
+  的表情——于是钩子一否决，宠物就永远卡在"等待批准"；反过来真需要批准时又只显示"正在
+  执行工具"。**修法**：`blocked` 归入 done（回合结束、无模型错误）；新接 `approval/asked→
+  waiting`、`approval/decided→thinking`。顺带 `tool/result` 也接上（原来只接 `tool/call`，
+  工具跑完后的一整段回答里宠物一直写着"正在执行 bash"）。
+- **新消息提醒漏掉每个会话的第一次回合结束**。原逻辑要求 `!first && same_session` 才提醒，
+  但一个会话第一次结束前没有基线，`same_session` 恒为假，于是第一次结束被吞掉；上次"实测
+  三方向通过"是因为测试脚本先在同一会话里跑了一轮、恰好造出了基线。**修法**：改成
+  `seen_session`+`baseline_end` 的按会话基线——新成为当前的会话**静默**采基线（它此刻的结束
+  是旧闻），只有**同一会话把基线往前推**才提醒。这样既压住"宠物出现前就结束的回合"和
+  "切进来的旧会话"，又能抓住**开始盯之后的第一次结束**。
+- **气泡的会话选择器加载不出来**。气泡窗口在启动时就建好，那时宿主还没起，挂载时的拉取
+  静默失败；而 `/state` 在有会话产生事件前一直报 `sessionId: null`，所以按 `sessionId` 变化
+  重试的那条路永远不触发。结果：开着宠物、不碰任何会话就关主窗口、点宠物 → 没有选择器、
+  输入框禁用（"没有可以发送的会话"），哪怕盘上有几十个会话。**修法**：气泡窗口每次**变可见**
+  时重拉（`visibilitychange`），且**第一次 `pet-state` 到达且列表仍空**时也补拉；单个会话也
+  可选（`>= 1`）。
+
+### 17.2 两个"修复自身可能引入的倒退"
+
+- **附着到已运行宿主时，别清 cookie**。清理只在**我们自己冷启动**时对：旧 cookie 都是旧端口
+  的、新页面靠 `?token=` 自己铸新的。但**附着路径**（DSH 已在 17890/3080 上跑）没有新 token，
+  页面靠的就是那个已运行宿主的 30 天 cookie——清掉它，`/` 和每个 `/api` 全 401。**修法**：
+  `finish_launch` 里读 `state.attached`，附着就跳过清理。
+- **防孤儿的 job 会连带杀掉 DSH 故意分离启动的程序**。Node 的 `detached: true` 从不传
+  `CREATE_BREAKAWAY_FROM_JOB`，所以宿主的全部后代都被 `KILL_ON_JOB_CLOSE` 的 job 圈住、随壳
+  一起死——包括 DSH 打算比自己活得久的程序（从会话里打开的编辑器等），**每次正常退出都杀**。
+  上一期"job 只覆盖我们 spawn 的那一个"这个说法不成立。**修法**：加
+  `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`——分离的后代能脱离 job，宿主自身因为不传 breakaway
+  仍随壳而死。
+
+### 17.3 其余已修的
+
+| 问题 | 后果 | 修法 |
+|---|---|---|
+| `/prompt`、`/select`、`/sessions` 没有来源校验（同级两个插件都有） | 外站页面可 SSRF：拿真实会话 id、往会话塞消息和任意本地文件 | 抄同级的 `sameOrigin`，在 `serve` 顶部统一挡；壳无 Origin 照常放行 |
+| 子 agent 的会话事件抢占"当前"并清掉用户的钉 | 钉住的会话把活交给子 agent 后，气泡改描述子 agent，下一条消息发给它被拒 | `session.header.origin === 'subagent'` 的会话不参与 current/钉 |
+| 休眠会话在选择器里全是"未命名会话" | 头信息里没有标题，只有活会话/本次见过 title 事件的才有 | 用 `sessionQuery.readTitleSnapshots` 批量折出标题 |
+| **最小化**主窗口被当成"有人在看" | 用户最小化（而非关闭）后回合结束不提醒 | `is_visible() && !is_minimized()` |
+| Alt+F4 宠物/气泡/托盘菜单会**销毁**单例窗口 | 之后每次显示都找不到窗口，唯一的重建路径又在主线程建 webview → 死锁 | `CloseRequested` 一律 `prevent_close` + 隐藏（宠物走 `pet::hide` 保持状态一致） |
+| 隐藏、从没显示过的宠物窗口的默认角落被存成"用户选的位置" | `RunEvent::Exit` 无条件存位置，关掉没开的宠物就把右下角改成左上角 | `write_position` 先判 `PET_VISIBLE` |
+| 气泡/菜单按**主显示器**工作区收拢 | 宠物在副屏时卡片被拉回主屏 | 新增 `window_work_area`，按宠物**自己所在显示器**的 `current_monitor().work_area()` 收拢（§16.4 那条） |
+| 双击宠物 = 开了又立刻关 | 气泡闪一下就没，未读角标也被无声清掉 | `bubble()` 在 OS 双击窗口内加去抖 |
+| 发消息超时把**已送达**的 prompt 报成失败 | 插件每次重试新铸 `requestId`，宿主去重拦不住 → 重复 prompt | 发消息超时提到 180s（覆盖上传）。**彻底的 requestId 幂等仍是 follow-up**（跨插件+UI） |
+
+### 17.4 没验的 / 仍是 follow-up（如实说）
+
+- **交互桌面才能验的三条**：Alt+F4 隐藏（合成关闭事件必达，证明不了"真按一下"）、双击去抖
+  （同理）、以及 §16.1 的点击打开——都在**代码层面**成立，真机需要一台有交互桌面的机器用
+  真鼠标。
+- **`visibilitychange` 在 Tauri 隐藏/显示窗口时是否真触发**：WebView2 对 `ShowWindow` 一般会
+  发，但这台机器没交互桌面没实按；`pet-state` 首达补拉是它的兜底，两者一起覆盖了报告里的
+  复现，但这条值得在真机上盯一眼。
+- **`approval/asked` 那张脸没有真实触发验证**：需要一个真会触发工具批准的回合，这次没造。
+  事件名和 payload 都对着源码核过了。
+- **`turn/end` 后 `waiting` 表情期间会显示上一个工具名**（`asked` 时设、下一个 `tool/result`/
+  `turn/end` 清），这是取舍不是缺陷。
+- **#10 的 requestId 幂等**：只做了壳侧加长超时，真正的"重试不重复"要插件铸一次性 id、UI
+  透传，跨三层，留作 follow-up。
+
 
 
 
