@@ -96,6 +96,8 @@ function Pet() {
   // transparent always-on-top window that keeps waking up to flip a class is a
   // battery cost for no visible benefit.
   const reaction = useRef<number | null>(null);
+  /** When the bubble was last toggled from here, for the double-click guard. */
+  const lastBubble = useRef(0);
   /**
    * Whether a `pet-queue` event has already been seen.
    *
@@ -205,6 +207,13 @@ function Pet() {
   }, []);
 
   const bubble = useCallback(() => {
+    // A double-click is one gesture, not "open then close". `show_pet_bubble`
+    // toggles, so without this the second click of a double-click hides the
+    // bubble the first click opened — and clears the missed badge unseen. Ignore
+    // a second trigger inside the OS double-click window.
+    const now = Date.now();
+    if (now - lastBubble.current < 400) return;
+    lastBubble.current = now;
     // Opening the bubble is what the badge is asking for, so it clears here —
     // that is the only thing that should clear it.
     setMissed(null);

@@ -345,6 +345,15 @@ pub fn remember_position_now(app: &AppHandle) {
 }
 
 fn write_position(app: &AppHandle) {
+    // A hidden pet's position is not a position: it is wherever the window happens
+    // to sit while nobody can see it, and for a window never shown that is the
+    // default corner. `RunEvent::Exit` records the position on *every* exit, so
+    // without this guard quitting with the pet off overwrites the user's real
+    // saved spot with that corner. Still correct on the hide path: `hide()` calls
+    // this before it clears the flag, so the last real position is kept.
+    if !PET_VISIBLE.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(window) = app.get_webview_window(PET_LABEL) else { return };
     let Ok(position) = window.outer_position() else { return };
     let monitor = window.current_monitor().ok().flatten().and_then(|m| m.name().cloned());

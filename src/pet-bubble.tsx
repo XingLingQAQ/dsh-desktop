@@ -342,6 +342,18 @@ function Bubble() {
   const [notice, setNotice] = useState<string | null>(null);
   const picker = useRef<HTMLDivElement | null>(null);
   const list = useRef<HTMLDivElement | null>(null);
+  /**
+   * The latest session list, for the `pet-state` listener.
+   *
+   * That listener is registered once, so reading `sessions` inside it would
+   * capture whatever the list was when the effect ran — null, forever. It needs
+   * to know whether a list has arrived yet, and this is that answer without
+   * re-subscribing to the event on every list change.
+   */
+  const sessionsRef = useRef<SessionList | null>(null);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
 
   /**
    * Re-read the picker's list.
@@ -422,7 +434,13 @@ function Bubble() {
     });
     const unState = listen<string>("pet-state", (event) => {
       const parsed = parse(event.payload);
-      if (parsed !== null) setState(parsed);
+      if (parsed !== null) {
+        setState(parsed);
+        // The host just answered for the first time — if we still have no
+        // session list (the mount read failed before the host was up), get it
+        // now rather than waiting for a sessionId change that may never come.
+        if (sessionsRef.current === null) void loadSessions();
+      }
     });
     // Fill in from the shell's cache before the first poll lands, so the card is
     // never briefly empty.
@@ -434,7 +452,9 @@ function Bubble() {
       unTheme.then((fn) => fn());
       unState.then((fn) => fn());
     };
-  }, []);
+    // `loadSessions` is stable (it reads nothing but `invoke`), so this
+    // re-subscribes in name only.
+  }, [loadSessions]);
 
   // The queue has its own channel. The shell emits `pet-queue` on every change —
   // a drop, a removal, a clear, a send — so this side never has to guess what a
@@ -459,6 +479,22 @@ function Bubble() {
   useEffect(() => {
     void loadSessions();
   }, [loadSessions, stateSessionId]);
+
+  // The bubble window is built at startup and only shown later, so the mount
+  // read of the session list can land before the host is up — and `/state`
+  // reports a null session until something happens, so the sessionId-change
+  // retry never fires either. Re-read whenever the window is shown again; a
+  // hidden Tauri window fires `visibilitychange` when it comes back.
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === "visible") {
+        void loadSessions();
+        void loadQueue();
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [loadSessions, loadQueue]);
 
   // A menu closes on the same gestures as a native one: Escape, or a click
   // anywhere outside — including the trigger itself, which toggles.
@@ -519,8 +555,10 @@ function Bubble() {
   const currentId = sessions?.current ?? stateSessionId;
   const current = sessions?.sessions.find((entry) => entry.id === currentId) ?? null;
   const title = current?.title ?? state?.title ?? null;
-  // A dropdown over one item is noise, and over none it is a dead control.
-  const pickable = sessions !== null && sessions.sessions.length > 1;
+  // A dropdown over one item is still the only way to pick that item — the pet
+  // can be pointed at any session on disk, not just the one the host is already
+  // on — so one row is a picker; none is a dead control.
+  const pickable = sessions !== null && sessions.sessions.length >= 1;
   // The turn count belongs to whatever `pet-state` is describing, which is the
   // host's current session — not necessarily the one just picked. Rather than
   // print one session's turn under another session's title, say nothing.

@@ -426,11 +426,15 @@ fn origin_of(url: &str) -> Option<String> {
 fn start_pet_state_watch(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last = String::new();
-        // The last turn end this loop has already reacted to, as
-        // `(session id, ended at)`. `None` means none seen yet, which is what
-        // stops the very first poll — which reads whatever the previous run left
-        // behind — from announcing a turn that finished before the pet existed.
-        let mut last_end: Option<(String, u64)> = None;
+        // The session the loop is currently tracking, and the end time already
+        // accounted for it (None while it is mid-turn or has never ended). A new
+        // current session establishes its baseline WITHOUT notifying — its end,
+        // if any, predates the pet's attention to it — so only an end that moves
+        // the baseline forward for the same session raises a badge. This both
+        // suppresses a turn that finished before the pet existed and, unlike the
+        // previous version, catches the FIRST end that happens while watching.
+        let mut seen_session: Option<String> = None;
+        let mut baseline_end: Option<u64> = None;
         loop {
             std::thread::sleep(PET_STATE_INTERVAL);
             if !pet::is_visible() {
@@ -455,25 +459,24 @@ fn start_pet_state_watch(app: tauri::AppHandle) {
             // miss and the whole reason the pet exists is that case.
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
                 let end = value.get("lastEnd");
-                let at = end.and_then(|e| e.get("at")).and_then(|a| a.as_u64());
                 let session = value
                     .get("sessionId")
                     .and_then(|s| s.as_str())
                     .unwrap_or_default()
                     .to_string();
-                if let Some(at) = at {
-                    // Keyed on the session as well as the time. `lastEnd` describes
-                    // whichever session is current, so switching sessions swaps in
-                    // a *different* session's end time — and comparing times alone
-                    // would read that as a turn that just finished, raising a badge
-                    // for something that ended twenty minutes ago in a
-                    // conversation the user has only just looked at.
-                    let same_session = last_end.as_ref().is_some_and(|(id, _)| id == &session);
-                    let advanced = last_end.as_ref().is_none_or(|(_, prev)| at > *prev);
-                    let first = last_end.is_none();
-                    if !same_session || advanced {
-                        last_end = Some((session, at));
-                        if !first && same_session && !main_window_visible(&app) {
+                let end_at = end.and_then(|e| e.get("at")).and_then(|a| a.as_u64());
+                if seen_session.as_deref() != Some(session.as_str()) {
+                    // New current session: adopt whatever it shows now as the
+                    // baseline, silently. Its current end (if any) is not news.
+                    seen_session = Some(session.clone());
+                    baseline_end = end_at;
+                } else if let Some(at) = end_at {
+                    // Same session we have been tracking. An end past the baseline
+                    // is a turn that just finished under our watch.
+                    let advanced = baseline_end.is_none_or(|prev| at > prev);
+                    if advanced {
+                        baseline_end = Some(at);
+                        if !main_window_visible(&app) {
                             let kind = end
                                 .and_then(|e| e.get("kind"))
                                 .and_then(|k| k.as_str())
@@ -500,9 +503,15 @@ fn start_pet_state_watch(app: tauri::AppHandle) {
 /// attached as a child webview, the latter fails its `is_webview_window` check
 /// and returns `None` for a window that is very much still there — which would
 /// read as "not visible" and make the pet announce every turn.
+///
+/// A minimized window is treated as not visible. It is still "visible" to the
+/// window APIs, but nobody is looking at it, and that is the whole question the
+/// pet exists to answer.
 fn main_window_visible(app: &tauri::AppHandle) -> bool {
     app.get_window("main")
-        .and_then(|window| window.is_visible().ok())
+        .map(|window| {
+            window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false)
+        })
         .unwrap_or(false)
 }
 
@@ -598,9 +607,11 @@ fn show_pet_bubble(app: tauri::AppHandle) {
     let (width, height) = pet_bubble_inner_size(&app);
     // Above the pet by preference: the pet's default home is the bottom-right
     // corner, so below is usually off-screen. Falls back to below when there is
-    // genuinely no room above.
+    // genuinely no room above. The room is measured against the pet's own
+    // monitor: the pet can be on a second display, and the primary monitor's top
+    // says nothing about how much space that one has.
     let above = position.y - height;
-    let y = match work_area() {
+    let y = match window_work_area(&pet_window) {
         Some((_, top, _, _)) if above >= top => above,
         _ => position.y + size.height as i32,
     };
@@ -731,7 +742,10 @@ async fn pet_send_prompt(
     let files = files.unwrap_or_default();
     let url = format!("{}/dsh-desktop-pet/prompt", pet_host_origin(&app)?);
     let body = json!({ "sessionId": session_id, "text": text, "files": files }).to_string();
-    let answer = host::http_post_json(&url, &body, host::PATIENT_TIMEOUT)
+    // The upload timeout, not the ordinary one: the plugin mints a fresh
+    // `requestId` per attempt, so a prompt that is timed out and re-sent is
+    // delivered twice rather than deduplicated. See `host::UPLOAD_TIMEOUT`.
+    let answer = host::http_post_json(&url, &body, host::UPLOAD_TIMEOUT)
         .ok_or_else(|| "发不出去：宿主没有响应".to_string())?;
     let accepted = serde_json::from_str::<serde_json::Value>(&answer)
         .ok()
@@ -770,7 +784,10 @@ fn show_pet_menu(app: tauri::AppHandle) {
     let Ok(size) = pet_window.outer_size() else { return };
     let (_, menu_height) = tray_menu_inner_size(&app);
     let below = position.y + size.height as i32;
-    let fits_below = match work_area() {
+    // Against the pet's own monitor, for the same reason as the bubble's
+    // above/below decision: the primary monitor's bottom is not the one the pet
+    // is sitting on.
+    let fits_below = match window_work_area(&pet_window) {
         Some((_, _, _, area_bottom)) => below + menu_height <= area_bottom,
         None => true,
     };
@@ -1405,6 +1422,34 @@ fn prepare_tray_menu(app: &tauri::AppHandle) -> tauri::Result<WebviewWindow> {
         .build()
 }
 
+/// The work area of the monitor `window` is on, as `(left, top, right, bottom)`
+/// — falling back to the primary monitor's when its own cannot be determined.
+///
+/// [`work_area`] alone is the *primary* monitor's rectangle, so it is the wrong
+/// answer for any window on a second display: clamping against it drags the card
+/// back onto the primary screen instead of keeping it beside its anchor.
+fn window_work_area(window: &WebviewWindow) -> Option<(i32, i32, i32, i32)> {
+    let own = window.current_monitor().ok().flatten().map(|monitor| {
+        // work_area is in the same physical coordinate space as everything else
+        // here, and it is the rectangle that excludes the taskbar.
+        let area = monitor.work_area();
+        (
+            area.position.x,
+            area.position.y,
+            area.position.x + area.size.width as i32,
+            area.position.y + area.size.height as i32,
+        )
+    });
+    match own {
+        // A monitor that reports no work area is no better than an unknown one,
+        // and clamping against an empty rectangle would put the card at (0, 0).
+        Some((left, top, right, bottom)) if right > left && bottom > top => {
+            Some((left, top, right, bottom))
+        }
+        _ => work_area(),
+    }
+}
+
 /// Move a small card window so its **visible** rectangle sits at `(x, y)`, pulled
 /// back inside the work area.
 ///
@@ -1417,7 +1462,7 @@ fn place_card(window: &WebviewWindow, x: i32, y: i32, width: i32, height: i32) {
         (Ok(outer), Ok(inner)) => (inner.x - outer.x, inner.y - outer.y),
         _ => (0, 0),
     };
-    let (inner_x, inner_y) = match work_area() {
+    let (inner_x, inner_y) = match window_work_area(window) {
         Some((left, top, right, bottom)) => (
             x.clamp(left, (right - width).max(left)),
             y.clamp(top, (bottom - height).max(top)),
@@ -1923,6 +1968,9 @@ fn finish_launch(handle: &tauri::AppHandle, state: &SharedState, url: &str, brid
             }),
         );
     }
+    // Taken into a local here, while the lock is short, rather than held down to
+    // the prune below — which sleeps for the splash hold and spawns a thread.
+    let attached = state.lock().unwrap().attached;
     // "就绪"状态停留一下再关闭 splash（DSH_SPLASH_HOLD_MS 可调，默认 1200ms）
     let hold_ms = std::env::var("DSH_SPLASH_HOLD_MS")
         .ok()
@@ -1955,8 +2003,13 @@ fn finish_launch(handle: &tauri::AppHandle, state: &SharedState, url: &str, brid
     //
     // 只在**页面还没认证过**的时候清：清的是全部 dsh-auth-*（名字里认不出哪个是
     // 本次的，见 prune_stale_auth_cookies），所以一旦页面已经用上了自己的 cookie，
-    // 再清就会把它一起删掉。重试启动会重新走到这里。
-    if !CONTENT_ATTACHED.load(Ordering::SeqCst) {
+    // 再清就会把它一起删掉。重试启动会重新走到这里。attach 路径同理：那一次没有
+    // 新 token，页面靠的就是已运行宿主的 cookie。
+    // Prune only when WE launched the host fresh. On the attach path the page
+    // authenticates with the existing host's cookie, so deleting it would 401
+    // every request — the stale-cookie pileup this guards against only happens
+    // across our own fresh launches.
+    if !attached && !CONTENT_ATTACHED.load(Ordering::SeqCst) {
         if let Some(main_webview) = handle.get_webview_window("main") {
             let origin = origin_of(url).unwrap_or_else(|| url.to_string());
             let removed = std::thread::spawn(move || {
@@ -2196,6 +2249,22 @@ pub fn run() {
             if let Err(error) = prepare_pet_bubble(app.handle()) {
                 eprintln!("dsh-desktop: prepare pet bubble failed: {error}");
             }
+            // The bubble and the menu are singletons too: pre-built hidden at
+            // startup and shown/hidden from then on, never rebuilt. Alt+F4 on one
+            // would destroy it, and every later show would find nothing — with the
+            // one rebuild path deadlocking (see `prepare_tray_menu`). So a close
+            // request on either is answered by hiding it instead.
+            for label in ["tray-menu", "pet-bubble"] {
+                if let Some(win) = app.get_webview_window(label) {
+                    let w = win.clone();
+                    win.on_window_event(move |event| {
+                        if let WindowEvent::CloseRequested { api, .. } = event {
+                            api.prevent_close();
+                            let _ = w.hide();
+                        }
+                    });
+                }
+            }
             // 上次没发出去的文件还在队列里——先读回来，并顺手丢掉已经被移动或删除的
             // 那些（留着只会让"发送"以一个用户看不到的文件为由失败）。
             pet_files::load();
@@ -2228,6 +2297,16 @@ pub fn run() {
                 let pet_handle = app.handle().clone();
                 pet_window.on_window_event(move |event| {
                     match event {
+                        // A singleton, pre-built hidden and reused. Destroying it
+                        // (Alt+F4) would strand every command that shows it, and
+                        // the only rebuild path deadlocks on Windows. Hide instead
+                        // — through `pet::hide`, so the visible flag and the saved
+                        // `enabled` stay in step with a pet that is no longer on
+                        // screen (a raw window hide leaves both claiming it is).
+                        WindowEvent::CloseRequested { api, .. } => {
+                            api.prevent_close();
+                            let _ = pet::hide(&pet_handle);
+                        }
                         WindowEvent::Moved(_) => pet::remember_position(&pet_handle),
                         // Files dropped on the pet. This arrives in Rust rather
                         // than in the page because the window is transparent and

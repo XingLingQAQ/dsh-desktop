@@ -120,7 +120,6 @@ const ACTIVITY = {
  */
 function activityForTurnEnd(reason) {
   const kind = typeof reason === 'object' && reason !== null ? reason.kind : null
-  if (kind === 'blocked') return { activity: ACTIVITY.waiting, code: null }
   if (kind === 'error') {
     const error = typeof reason === 'object' && reason !== null ? reason.error : null
     const code = typeof error === 'object' && error !== null && typeof error.code === 'string'
@@ -128,8 +127,9 @@ function activityForTurnEnd(reason) {
       : null
     return { activity: ACTIVITY.error, code }
   }
-  // `aborted` / `interrupted` / `max-tokens` all end the turn without failing it
-  // outright; the pet has no separate face for them yet, so they read as done.
+  // `blocked` (a hook vetoed the step, and the turn has already ended) and
+  // `aborted` / `interrupted` / `max-tokens` all end the turn without a model
+  // error, so they read as done. The real "waiting for you" is `approval/asked`.
   return { activity: ACTIVITY.done, code: null }
 }
 
@@ -162,10 +162,15 @@ export function apply(ctx) {
    * running means the subscription is the problem, not the mapping.
    */
   let eventCount = 0
-  /** Set when a title arrives from the title service rather than the log. */
+  /**
+   * The title service, or null when this host has none.
+   *
+   * `ctx.get` returns `undefined` for a service the context cannot reach in some
+   * compositions, so it is normalised here rather than guessed at every use.
+   */
   let titleService = null
   try {
-    titleService = ctx.get('sessionTitle')
+    titleService = ctx.get('sessionTitle') ?? null
   } catch {
     titleService = null
   }
@@ -201,7 +206,7 @@ export function apply(ctx) {
    * @returns {string | null} the title, or null.
    */
   const titleOf = (session) => {
-    if (titleService === null) return null
+    if (!titleService) return null
     try {
       const snapshot = titleService.get?.(session)
       return typeof snapshot?.title === 'string' && snapshot.title !== '' ? snapshot.title : null
@@ -214,6 +219,7 @@ export function apply(ctx) {
     eventCount += 1
     const id = typeof session?.id === 'string' ? session.id : null
     if (id === null) return
+    const isSubagent = session?.header?.origin === 'subagent'
     const view = viewFor(id)
     const type = typeof event?.type === 'string' ? event.type : null
     view.movedAt = Date.now()
@@ -225,12 +231,18 @@ export function apply(ctx) {
       view.lastEnd = null
       // A turn starting somewhere else means the user moved on, so the pet
       // follows. Without this an explicit pick would stick even after they had
-      // visibly gone to work in another conversation.
-      if (pinned !== null && pinned !== id) pinned = null
+      // visibly gone to work in another conversation. A subagent is not the
+      // user moving: it is work the pinned session started.
+      if (!isSubagent && pinned !== null && pinned !== id) pinned = null
     } else if (type === 'tool/call') {
       const name = typeof event?.data?.name === 'string' ? event.data.name : null
       view.activity = ACTIVITY.tool
       view.tool = name
+    } else if (type === 'tool/result') {
+      // The tool returned; the agent is processing again. Without this the pet
+      // stays "running <tool>" through the entire answer that follows.
+      view.activity = ACTIVITY.thinking
+      view.tool = null
     } else if (type === 'turn/end') {
       const mapped = activityForTurnEnd(event?.data?.reason)
       view.activity = mapped.activity
@@ -240,13 +252,25 @@ export function apply(ctx) {
         code: mapped.code,
         at: Date.now(),
       }
+    } else if (type === 'approval/asked') {
+      // The real "waiting for you", mid-turn — unlike `blocked`, which is a turn
+      // that has already ended. A tool needs the user's decision before it runs.
+      view.activity = ACTIVITY.waiting
+      view.tool = typeof event?.data?.toolName === 'string' ? event.data.toolName : view.tool
+    } else if (type === 'approval/decided') {
+      // Decision made; the turn resumes. The next tool/call or turn/end sets the
+      // precise activity — thinking is the honest interim.
+      view.activity = ACTIVITY.thinking
     } else if (type === 'session/title') {
       const title = typeof event?.data?.title === 'string' ? event.data.title : null
       if (title !== null && title !== '') view.title = title
     }
 
-    // Newest movement wins the "current session" slot.
-    if (current === null || view.movedAt >= (sessions.get(current)?.movedAt ?? 0)) {
+    // Newest movement wins the "current session" slot. Subagent sessions are
+    // excluded: the pet reports on the conversation the user is in, and a
+    // subagent's session refuses a direct prompt, so making one current would
+    // both misdescribe the bubble and break the picker's way back in.
+    if (!isSubagent && (current === null || view.movedAt >= (sessions.get(current)?.movedAt ?? 0))) {
       current = id
       if (view.title === null) view.title = titleOf(session)
     }
@@ -304,6 +328,10 @@ export function apply(ctx) {
 async function serve(req, res, ctx, store) {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
   const route = url.pathname.slice(PREFIX.length)
+  if (!sameOrigin(req)) {
+    json(res, 403, { error: 'forbidden' })
+    return
+  }
   if (route === '/state') {
     json(res, 200, { ...snapshot(store), ...store.diagnostics() })
     return
@@ -432,6 +460,26 @@ async function sessionList(store, ctx) {
     // child that was never persisted, say. The picker still has to be able to
     // show it selected, or it would contradict `/state`.
     rows.set(current, rowFor(current, null, liveSessions.has(current)))
+  }
+  // The corpus listing carries headers but no titles, so a dormant session —
+  // one this run has seen no `session/title` event for — would render as
+  // "未命名会话". Its title is still in the log, and the query service folds it
+  // back out for a batch of ids at a time.
+  const query = service(ctx, 'sessionQuery')
+  const untitled = [...rows.values()].filter((row) => row.title === null).map((row) => row.id)
+  if (untitled.length > 0 && query !== null && typeof query.readTitleSnapshots === 'function') {
+    try {
+      for (const result of await query.readTitleSnapshots(untitled)) {
+        const folded = result?.status === 'fulfilled' ? result.value?.title?.title : null
+        if (typeof folded === 'string' && folded !== '') {
+          const row = rows.get(result.sessionId)
+          if (row !== undefined) row.title = folded
+        }
+      }
+    } catch {
+      // A title-fold failure leaves the untitled rows as they were — a missing
+      // title is a worse picker, not a broken one.
+    }
   }
   const sessions = [...rows.values()]
     // Newest first, by the same timestamp each row reports. Ids break ties so
@@ -780,6 +828,29 @@ function service(ctx, name) {
     return ctx.get(name) ?? null
   } catch {
     return null
+  }
+}
+
+/**
+ * Whether a request came from the page this server serves.
+ *
+ * A cross-site page must not be able to drive these routes (SSRF / a message
+ * or file smuggled into a session). A request with no Origin (the shell's own
+ * polls, curl) is loopback-only anyway and passes; one that announces an Origin
+ * whose host differs from the request's Host is refused. Matches the guard the
+ * sibling desktop plugins use.
+ * @param {import('node:http').IncomingMessage} req - the request to judge.
+ * @returns {boolean} true when no Origin was announced, or it matches the Host.
+ */
+function sameOrigin(req) {
+  const origin = req.headers.origin
+  if (origin === undefined) return true
+  const host = req.headers.host
+  if (host === undefined) return false
+  try {
+    return new URL(origin).host === host
+  } catch {
+    return false
   }
 }
 

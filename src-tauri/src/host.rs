@@ -53,6 +53,14 @@ pub struct HostProcess {
 /// it ends — everything in the job is terminated. No cleanup code has to run,
 /// which is exactly the property that was missing.
 ///
+/// The job is limited to the host process and its **non-detached** children.
+/// `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK` lets a child leave the job without
+/// asking, and that is deliberate: DSH launches some things to outlive itself
+/// (an editor opened from a session, for one), and without the flag those are
+/// trapped in the job and die with the shell — every time, on a perfectly
+/// ordinary exit. Detached descendants escape; the host itself does not, because
+/// it never passes `CREATE_BREAKAWAY_FROM_JOB`.
+///
 /// Returns the job handle to keep open, or `None` if the job could not be set up
 /// (nested jobs are refused in some configurations). A `None` here is not fatal:
 /// the ordinary kill-on-exit path still applies, this only covers the rude exits.
@@ -62,7 +70,7 @@ fn adopt_into_kill_on_close_job(child: &Child) -> Option<isize> {
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
         SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
     };
 
     unsafe {
@@ -71,7 +79,8 @@ fn adopt_into_kill_on_close_job(child: &Child) -> Option<isize> {
             return None;
         }
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
         let configured = SetInformationJobObject(
             job,
             JobObjectExtendedLimitInformation,
@@ -343,6 +352,11 @@ pub const QUICK_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// For anything with a person waiting on the other end.
 pub const PATIENT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// For sending a prompt, which may stream file uploads to the host: far longer
+/// than an ordinary host call, because a prompt that was actually delivered and
+/// then reported as a failure makes the user send it again.
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// One minimal HTTP/1.0 exchange against loopback.
 ///
