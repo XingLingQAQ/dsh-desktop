@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Shell windows: titlebar controls, drag region, events. The pet is listed for the same reason the others are: it drags itself with the window manager and listens for theme changes, and both of those are core-plugin commands that a window without a capability is refused.",
-  "windows": ["main", "splash", "tray-menu", "update-popup", "pet"],
+  "description": "Shell windows: titlebar controls, drag region, events. Every window that draws its own UI is listed, because the permissions that matter here are per-window: the pet drags itself with the window manager, the pet and its bubble both listen for the state and theme events, and the bubble hides itself on Escape. A window left out of this list still renders — it just silently fails at each of those.",
+  "windows": ["main", "splash", "tray-menu", "update-popup", "pet", "pet-bubble"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",

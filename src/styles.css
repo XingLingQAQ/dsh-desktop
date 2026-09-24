@@ -2110,21 +2110,362 @@ html.pet-window body {
   }
 }
 
+/* ── 会话状态的表情 ────────────────────────────────────────────────────
+ *
+ * 宠物的脸跟着当前会话走：思考 / 执行工具 / 等待批准 / 完成 / 出错。
+ *
+ * 一条原则：**只用已经存在的零件**（眼睛、耳朵、嘴、腮红、肚子），不新增图形。
+ * 这样每个表情都是同一只宠物在变，而不是换了一张脸。改动幅度也刻意小——一眼能
+ * 看出"它现在是忙的"，但不会让人盯着看。
+ *
+ * 颜色上只有"出错"动色（去饱和 + 变暗），其余全靠姿态。宠物在桌面角落，余光扫
+ * 过去时姿态比颜色更容易读。
+ */
+
+/* 忙的时候头顶浮三个点，这是"在处理"最省的一句话。 */
+.pet-busy {
+  position: absolute;
+  left: 50%;
+  top: 10px;
+  margin-left: -13px;
+  width: 26px;
+  height: 6px;
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.pet-busy span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--pet-ink);
+  opacity: 0.35;
+  animation: pet-busy-dot 1.15s ease-in-out infinite;
+}
+
+.pet-busy span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.pet-busy span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes pet-busy-dot {
+  0%,
+  70%,
+  100% {
+    opacity: 0.28;
+    transform: translateY(0);
+  }
+  35% {
+    opacity: 0.95;
+    transform: translateY(-2px);
+  }
+}
+
+/* 思考中：眼睛往上挪一点（"在想事情"），身体轻微起伏，点浮出来。 */
+.pet-root[data-mood='thinking'] .pet-busy,
+.pet-root[data-mood='tool'] .pet-busy {
+  display: flex;
+}
+
+.pet-root[data-mood='thinking'] .pet-eye {
+  /* 往上看：眼珠整体上移，同时压扁一点，读起来像在凝神。 */
+  transform: translateY(-3px) scaleY(0.86);
+  animation: none;
+}
+
+.pet-root[data-mood='thinking'] .pet-figure {
+  animation: pet-ponder 2.4s ease-in-out infinite;
+}
+
+@keyframes pet-ponder {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-3px) rotate(-1.2deg);
+  }
+}
+
+/* 执行工具：和思考同一个"忙"的点，但耳朵竖起来，区分"在等模型"和"在跑东西"。 */
+.pet-root[data-mood='tool'] .pet-ear-left {
+  transform: rotate(-4deg);
+  animation: none;
+}
+
+.pet-root[data-mood='tool'] .pet-ear-right {
+  transform: rotate(4deg) scaleX(-1);
+  animation: none;
+}
+
+.pet-root[data-mood='tool'] .pet-figure {
+  animation: pet-work 0.9s ease-in-out infinite;
+}
+
+@keyframes pet-work {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+}
+
+/* 等待批准：眼睛睁大、嘴张成小圆，姿态是"看着你"。这是唯一需要用户做事的
+   状态，所以它和其他状态要一眼能分开。 */
+.pet-root[data-mood='waiting'] .pet-eye {
+  transform: scaleY(1.25) scaleX(1.1);
+  animation: none;
+}
+
+.pet-root[data-mood='waiting'] .pet-mouth {
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  border-radius: 50%;
+  border: 2px solid var(--pet-ink);
+  border-bottom-color: var(--pet-ink);
+  opacity: 0.8;
+}
+
+.pet-root[data-mood='waiting'] .pet-figure {
+  animation: pet-wait 1.6s ease-in-out infinite;
+}
+
+@keyframes pet-wait {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+/* 完成：复用被摸那一下的弹跳和星星，因为对用户来说这两件事是同一种好消息。 */
+.pet-root[data-mood='done'] .pet-figure {
+  animation: pet-hop 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.pet-root[data-mood='done'] .pet-cheek {
+  opacity: 0.55;
+}
+
+.pet-root[data-mood='done'] .pet-mouth {
+  opacity: 1;
+  height: 10px;
+}
+
+.pet-root[data-mood='done'] .pet-sparkle {
+  opacity: 1;
+}
+
+/* 出错：耳朵垂下来、嘴压平、整体去一点饱和。这是唯一动颜色的状态——宠物在
+   角落，出错是必须被注意到的那个。 */
+.pet-root[data-mood='error'] .pet-ear-left {
+  transform: rotate(-46deg) translateY(5px);
+  animation: none;
+}
+
+.pet-root[data-mood='error'] .pet-ear-right {
+  transform: rotate(46deg) translateY(5px) scaleX(-1);
+  animation: none;
+}
+
+.pet-root[data-mood='error'] .pet-eye {
+  /* 眯起来，而不是闭紧：闭眼读起来像睡觉，眯眼才像"出事了"。 */
+  transform: scaleY(0.5);
+  animation: none;
+}
+
+.pet-root[data-mood='error'] .pet-mouth {
+  height: 4px;
+  border-radius: 6px 6px 0 0;
+  border-bottom: none;
+  border-top: 2px solid var(--pet-ink);
+  opacity: 0.75;
+}
+
+.pet-root[data-mood='error'] .pet-head,
+.pet-root[data-mood='error'] .pet-belly,
+.pet-root[data-mood='error'] .pet-ear {
+  filter: saturate(0.55) brightness(0.85);
+}
+
+.pet-root[data-mood='error'] .pet-figure {
+  animation: pet-sag 3.4s ease-in-out infinite;
+}
+
+@keyframes pet-sag {
+  0%,
+  100% {
+    transform: translateY(1px);
+  }
+  50% {
+    transform: translateY(3px);
+  }
+}
+
 /* ── 减弱动效 ────────────────────────────────────────────────────────
  *
  * 这里和别处不同：宠物的**存在方式**就是动。全关掉之后它是一张图，不再是
- * 宠物。所以取舍是——把所有"循环、持续"的动作（呼吸、眨眼、耳朵抖）停掉，
- * 只保留用户主动触发的那一下（点击后的弹跳）。这样屏幕安静了，但"我摸它有
- * 反应"这件事还在。
+ * 宠物。所以取舍是——把所有"循环、持续"的动作（呼吸、眨眼、耳朵抖、思考起伏）
+ * 停掉，只保留用户主动触发的那一下（点击后的弹跳）。
+ *
+ * 状态**照样能看出来**：上面每个状态都不只靠动画，姿态（眼睛、耳朵、嘴）本身
+ * 就不同，所以这里停掉动画不会让"它在忙"这件事消失。
  */
 @media (prefers-reduced-motion: reduce) {
   .pet-figure,
   .pet-eye,
   .pet-ear-left,
-  .pet-ear-right {
+  .pet-ear-right,
+  .pet-busy span {
     animation: none;
   }
-  .pet-root[data-mood='happy'] .pet-figure {
+  .pet-root[data-mood='happy'] .pet-figure,
+  .pet-root[data-mood='done'] .pet-figure {
     animation: pet-hop 0.5s ease-out;
+  }
+  /* 忙碌的点在减弱动效下不再闪，但要保持可见——它是"在忙"唯一的非姿态信号。 */
+  .pet-busy span {
+    opacity: 0.6;
+  }
+}
+
+/* ── 宠物的气泡 ──────────────────────────────────────────────────────
+ *
+ * 宠物那张脸能说"在忙"，但说不出"在跑 pwsh"，也说不出它说的是哪个会话。这个
+ * 卡片就是那句缺掉的话。
+ *
+ * 样式照 DSH 的卡片语言来：`--ds-overlay` 底、发丝描边、16 圆角、第三层阴影
+ * ——和更新弹窗同一套，这样它读起来像这个应用的一部分，而不是宠物自己发明的东西。
+ *
+ * 窗口是透明的，所以圆角背景得画在这张卡片上。
+ */
+html.pet-bubble-window,
+html.pet-bubble-window body {
+  background: transparent;
+  overflow: hidden;
+}
+
+.pet-bubble {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 0.5px solid var(--ds-border-2);
+  background: var(--ds-overlay);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+  color: var(--ds-label);
+  font-size: 13px;
+  line-height: 1.45;
+  user-select: none;
+  animation: pet-bubble-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes pet-bubble-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.pet-bubble-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* 状态点：颜色是这里唯一的"语气"载体，所以每个 tone 都要真的不同色，
+   而不是同一个灰点配不同文案。 */
+.pet-bubble-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ds-label-3);
+}
+
+.pet-bubble[data-tone='busy'] .pet-bubble-dot {
+  background: var(--ds-brand);
+  /* 忙的时候点会呼吸——静止的点和"空闲"长得一样。 */
+  animation: pet-bubble-pulse 1.4s ease-in-out infinite;
+}
+
+.pet-bubble[data-tone='waiting'] .pet-bubble-dot {
+  background: var(--ds-warn);
+  animation: pet-bubble-pulse 1.4s ease-in-out infinite;
+}
+
+.pet-bubble[data-tone='done'] .pet-bubble-dot {
+  background: var(--ds-success);
+}
+
+.pet-bubble[data-tone='error'] .pet-bubble-dot {
+  background: var(--ds-error);
+}
+
+@keyframes pet-bubble-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+
+/* 会话标题：可能很长，一行截断。气泡不滚动——需要滚动的内容属于主窗口。 */
+.pet-bubble-session {
+  flex: 1;
+  min-height: 0;
+  font-size: 12.5px;
+  color: var(--ds-label-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.pet-bubble-muted {
+  color: var(--ds-label-3);
+}
+
+.pet-bubble-foot {
+  flex: none;
+  font-size: 11px;
+  color: var(--ds-label-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-bubble {
+    animation: none;
+  }
+  .pet-bubble-dot {
+    animation: none;
+  }
+  /* 点不再呼吸时，"忙"要换个方式说——颜色本身还在，这就够了。 */
+  .pet-bubble[data-tone='busy'] .pet-bubble-dot,
+  .pet-bubble[data-tone='waiting'] .pet-bubble-dot {
+    opacity: 1;
   }
 }

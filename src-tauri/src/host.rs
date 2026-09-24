@@ -235,3 +235,61 @@ pub fn http_get_ok(url: &str) -> bool {
 pub fn probe_existing(port: u16) -> bool {
     http_get_ok(&format!("http://127.0.0.1:{port}"))
 }
+
+/// GET a loopback URL and return its body.
+///
+/// Used for the pet's session-state route, which is polled while the pet is on
+/// screen. The request is deliberately `HTTP/1.0` with `Connection: close`, so
+/// the body is whatever follows the headers and the read ends at EOF — no
+/// chunked-encoding parser is needed for what is a few hundred bytes of JSON
+/// from a server on the same machine.
+///
+/// A plugin route is not behind the host's token (only the app shell is), so the
+/// URL here is the bare origin plus the path.
+pub fn http_get_body(url: &str) -> Option<String> {
+    let parsed = url.strip_prefix("http://")?;
+    let (host, rest) = parsed.split_once(':')?;
+    let (port_part, path) = match rest.split_once('/') {
+        Some((port, rest_path)) => (port, format!("/{rest_path}")),
+        None => (rest, "/".to_string()),
+    };
+    let port: u16 = port_part.parse().ok()?;
+    let addr: std::net::SocketAddr = format!("{host}:{port}").parse().ok()?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
+    let request = format!(
+        "GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut raw = Vec::new();
+    // A cap, so a route that answers with something enormous cannot make the
+    // shell allocate without bound. The state document is well under this.
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&chunk[..n]);
+                if raw.len() > 256 * 1024 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n")?;
+    // Only a 2xx carries state; anything else is the host saying no, and the
+    // caller should treat that as "no state" rather than parse an error page.
+    let status_ok = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .is_some_and(|code| (200..300).contains(&code));
+    if !status_ok {
+        return None;
+    }
+    Some(body.to_string())
+}

@@ -368,6 +368,9 @@ fn set_pet_visible(app: tauri::AppHandle, visible: bool) -> Result<bool, String>
         pet::show(&app)?;
     } else {
         pet::hide(&app)?;
+        // The bubble is anchored to the pet, so leaving it behind would strand a
+        // card pointing at nothing.
+        hide_pet_bubble(app.clone());
     }
     Ok(pet::load().enabled)
 }
@@ -382,6 +385,167 @@ fn pet_visible() -> bool {
 #[tauri::command]
 fn pet_save_position(app: tauri::AppHandle) {
     pet::remember_position_now(&app);
+}
+
+/// How often the pet asks the host what the current session is doing.
+///
+/// Polling rather than a push channel: the state is a few hundred bytes from a
+/// server on the same machine, and a pet's expression does not need to be
+/// frame-accurate. An SSE route would remove the interval, and is worth doing if
+/// the bubble ever shows streaming text.
+const PET_STATE_INTERVAL: Duration = Duration::from_millis(600);
+
+/// `http://127.0.0.1:59262/?token=…` → `http://127.0.0.1:59262`
+///
+/// The token in the readiness URL authenticates the app shell, not the plugin
+/// routes, and carrying it into a polled URL would put it in the host's logs for
+/// no benefit.
+fn origin_of(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("http://")?;
+    let authority = match rest.find('/') {
+        Some(index) => &rest[..index],
+        None => rest,
+    };
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("http://{authority}"))
+}
+
+/// Watch the host's session state and tell the pet window about changes.
+///
+/// The pet cannot fetch this itself. It is a shell window on a different origin
+/// from the DSH host, and the shell is the only party that knows where the host
+/// is listening — so the shell fetches and re-emits over Tauri's own event
+/// channel, which the pet window already has permission to listen on.
+///
+/// The loop idles while the pet is hidden, and forgets the last value when it
+/// goes away so the pet is told the state again the moment it comes back, rather
+/// than waiting for something to change.
+fn start_pet_state_watch(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut last = String::new();
+        loop {
+            std::thread::sleep(PET_STATE_INTERVAL);
+            if !pet::is_visible() {
+                last.clear();
+                continue;
+            }
+            let url = match app.try_state::<SharedState>() {
+                Some(state) => state.lock().unwrap().url.clone(),
+                None => None,
+            };
+            let Some(origin) = url.as_deref().and_then(origin_of) else { continue };
+            let target = format!("{origin}/dsh-desktop-pet/state");
+            let Some(body) = host::http_get_body(&target) else { continue };
+            if body != last {
+                last = body.clone();
+                *LAST_PET_STATE.lock().unwrap() = Some(body.clone());
+                let _ = app.emit("pet-state", body);
+            }
+        }
+    });
+}
+
+/// Logical size of the pet's bubble.
+///
+/// Wide enough for a session title and two short lines; deliberately not a chat
+/// transcript. The bubble answers "what is it doing", and anything that needs
+/// scrolling belongs in the main window.
+const PET_BUBBLE_WIDTH: f64 = 268.0;
+const PET_BUBBLE_HEIGHT: f64 = 156.0;
+
+/// The most recent session-state document.
+///
+/// Cached so a window that opens between two polls can render immediately rather
+/// than showing an empty card for up to one interval. Without it, opening the
+/// bubble always looks like a flicker before it fills in.
+static LAST_PET_STATE: Mutex<Option<String>> = Mutex::new(None);
+
+/// The last session-state document the host sent, if any.
+#[tauri::command]
+fn pet_session_state() -> Option<String> {
+    LAST_PET_STATE.lock().unwrap().clone()
+}
+
+/// Create the pet's bubble window if it does not exist yet, hidden.
+///
+/// Pre-created for the same reason as the other auxiliary windows, and here the
+/// reason is sharpest: the bubble opens on a *click*, and a webview build on that
+/// click is a visible stall in the middle of a gesture.
+fn prepare_pet_bubble(app: &tauri::AppHandle) -> tauri::Result<WebviewWindow> {
+    if let Some(existing) = app.get_webview_window("pet-bubble") {
+        return Ok(existing);
+    }
+    WebviewWindowBuilder::new(app, "pet-bubble", WebviewUrl::App("pet-bubble.html".into()))
+        .title("DSH Desktop Pet")
+        .inner_size(PET_BUBBLE_WIDTH, PET_BUBBLE_HEIGHT)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .transparent(true)
+        .visible(false)
+        .build()
+}
+
+/// The bubble's visible size in physical pixels.
+fn pet_bubble_inner_size(app: &tauri::AppHandle) -> (i32, i32) {
+    let Some(window) = app.get_webview_window("pet-bubble") else {
+        return (PET_BUBBLE_WIDTH as i32, PET_BUBBLE_HEIGHT as i32);
+    };
+    match (window.inner_size(), window.scale_factor()) {
+        (Ok(size), _) if size.width > 0 => (size.width as i32, size.height as i32),
+        (_, Ok(scale)) => (
+            (PET_BUBBLE_WIDTH * scale).round() as i32,
+            (PET_BUBBLE_HEIGHT * scale).round() as i32,
+        ),
+        _ => (PET_BUBBLE_WIDTH as i32, PET_BUBBLE_HEIGHT as i32),
+    }
+}
+
+/// Open the pet's bubble, or close it if it is already open.
+///
+/// A toggle rather than show-only, because clicking the pet is the gesture that
+/// both opens and dismisses it: the bubble is anchored to the pet, so the pet is
+/// the natural place to click it away. (Clicking elsewhere does not dismiss it
+/// yet — the update popup needed Raw Input to notice that, and this reuses none
+/// of that machinery. See the note in the phase 2 write-up.)
+#[tauri::command]
+fn show_pet_bubble(app: tauri::AppHandle) {
+    let Some(bubble) = app.get_webview_window("pet-bubble") else {
+        eprintln!("dsh-desktop: pet bubble window is missing");
+        return;
+    };
+    if bubble.is_visible().unwrap_or(false) {
+        let _ = bubble.hide();
+        return;
+    }
+    let Some(pet_window) = app.get_webview_window(pet::PET_LABEL) else { return };
+    let Ok(position) = pet_window.outer_position() else { return };
+    let Ok(size) = pet_window.outer_size() else { return };
+    let (width, height) = pet_bubble_inner_size(&app);
+    // Above the pet by preference: the pet's default home is the bottom-right
+    // corner, so below is usually off-screen. Falls back to below when there is
+    // genuinely no room above.
+    let above = position.y - height;
+    let y = match work_area() {
+        Some((_, top, _, _)) if above >= top => above,
+        _ => position.y + size.height as i32,
+    };
+    place_card(&bubble, position.x, y, width, height);
+    let _ = bubble.show();
+    // No `set_focus`: the bubble is informational, and stealing focus from
+    // whatever the user is typing in would be a rude way to answer a click.
+}
+
+/// Close the pet's bubble.
+#[tauri::command]
+fn hide_pet_bubble(app: tauri::AppHandle) {
+    if let Some(bubble) = app.get_webview_window("pet-bubble") {
+        let _ = bubble.hide();
+    }
 }
 
 /// Open the pet's own small menu, anchored to the pet window.
@@ -1032,6 +1196,28 @@ fn prepare_tray_menu(app: &tauri::AppHandle) -> tauri::Result<WebviewWindow> {
         .build()
 }
 
+/// Move a small card window so its **visible** rectangle sits at `(x, y)`, pulled
+/// back inside the work area.
+///
+/// Clamps the visible rectangle rather than the window rectangle: these windows
+/// carry an invisible resize frame (8px per side here, plus 1px at the top), so
+/// clamping the frame leaves the card hanging over the screen edge by exactly
+/// that much — which is what the first version of the tray menu placement did.
+fn place_card(window: &WebviewWindow, x: i32, y: i32, width: i32, height: i32) {
+    let (frame_x, frame_y) = match (window.outer_position(), window.inner_position()) {
+        (Ok(outer), Ok(inner)) => (inner.x - outer.x, inner.y - outer.y),
+        _ => (0, 0),
+    };
+    let (inner_x, inner_y) = match work_area() {
+        Some((left, top, right, bottom)) => (
+            x.clamp(left, (right - width).max(left)),
+            y.clamp(top, (bottom - height).max(top)),
+        ),
+        None => (x, y),
+    };
+    let _ = window.set_position(PhysicalPosition::new(inner_x - frame_x, inner_y - frame_y));
+}
+
 /// Show the custom tray menu popup near the tray icon or the pet.
 ///
 /// `x`/`y` are the desired position of the menu's **visible** top-left, in
@@ -1047,22 +1233,7 @@ fn show_tray_menu(app: &tauri::AppHandle, x: i32, y: i32) {
         return;
     };
     let (width, height) = tray_menu_inner_size(app);
-    // Clamp the visible card, not the window rectangle. The window carries an
-    // invisible resize frame (8px per side here, plus 1px at the top), so
-    // clamping the frame leaves the card hanging over the screen edge by exactly
-    // that much — which is what the first version of this did.
-    let (frame_x, frame_y) = match (menu_window.outer_position(), menu_window.inner_position()) {
-        (Ok(outer), Ok(inner)) => (inner.x - outer.x, inner.y - outer.y),
-        _ => (0, 0),
-    };
-    let (inner_x, inner_y) = match work_area() {
-        Some((left, top, right, bottom)) => (
-            x.clamp(left, (right - width).max(left)),
-            y.clamp(top, (bottom - height).max(top)),
-        ),
-        None => (x, y),
-    };
-    let _ = menu_window.set_position(PhysicalPosition::new(inner_x - frame_x, inner_y - frame_y));
+    place_card(&menu_window, x, y, width, height);
     let _ = menu_window.show();
     let _ = menu_window.set_focus();
 }
@@ -1467,6 +1638,53 @@ fn start_launch(
     });
 }
 
+/// Delete the auth cookies left behind by previous launches.
+///
+/// The DSH host authenticates its web UI with a cookie named for the launch's
+/// token — `dsh-auth-<token>` — and gives it a 30-day life. Nothing ever removes
+/// them, so every launch adds another ~173 bytes to the `Cookie` header of every
+/// request this webview makes. Chromium refuses to *send* a request whose headers
+/// exceed roughly 2 KB, and its own baseline headers already use most of that, so
+/// after enough restarts the app's own page fails with `431 Request Header Fields
+/// Too Large` before a line of it runs. Measured here: **69 cookies, ~15.6 KB**,
+/// and a page that would not load at all.
+///
+/// Only this launch's cookie is kept. Every cookie in this webview is one of
+/// these — 69 of 69 when this was written — so there is nothing else to preserve,
+/// and keeping the current one matters because the page's own API calls rely on it.
+///
+/// Must run **before** the content webview makes its first request, and on a
+/// thread that is not a synchronous command or an event handler: Tauri documents
+/// these cookie calls as deadlocking in those contexts on Windows. The caller
+/// joins the thread rather than firing and forgetting, because the request that
+/// fails is the very next one.
+fn prune_stale_auth_cookies(window: &WebviewWindow, origin: &str, keep_token: &str) -> usize {
+    let Ok(url) = Url::parse(origin) else { return 0 };
+    let Ok(cookies) = window.cookies_for_url(url) else { return 0 };
+    let keep = format!("dsh-auth-{keep_token}");
+    let mut removed = 0usize;
+    for cookie in cookies {
+        if !cookie.name().starts_with("dsh-auth-") || cookie.name() == keep {
+            continue;
+        }
+        if window.delete_cookie(cookie).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// The `token` query value from the host's readiness URL, if present.
+fn token_of(url: &str) -> Option<&str> {
+    let rest = url.split_once("token=")?.1;
+    let token = rest.split(['&', '#']).next()?;
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
 fn check_exited(process: &mut HostProcess) -> Option<String> {
     if process.is_alive() {
         return None;
@@ -1520,6 +1738,23 @@ fn finish_launch(handle: &tauri::AppHandle, state: &SharedState, url: &str, brid
         let _ = main.set_focus();
     }
     // 4. 立即挂载 DSH（子控制器在可见窗口上初始化）
+    //
+    // 挂载之前先清掉历史登录 cookie，而且要等它做完：会撞上 431 的正是子
+    // webview 的第一个请求，清理晚一步就没有意义。见 prune_stale_auth_cookies。
+    if let Some(token) = token_of(url) {
+        if let Some(main_webview) = handle.get_webview_window("main") {
+            let origin = origin_of(url).unwrap_or_else(|| url.to_string());
+            let token = token.to_string();
+            let removed = std::thread::spawn(move || {
+                prune_stale_auth_cookies(&main_webview, &origin, &token)
+            })
+            .join()
+            .unwrap_or(0);
+            if removed > 0 {
+                eprintln!("dsh-desktop: 清理了 {removed} 个上次启动留下的登录 cookie");
+            }
+        }
+    }
     if let Ok(parsed) = url.parse::<Url>() {
         if let Err(error) = attach_content_webview(handle, parsed, bridge) {
             eprintln!("dsh-desktop: attach content webview failed: {error}");
@@ -1567,6 +1802,9 @@ pub fn run() {
             pet_visible,
             pet_save_position,
             show_pet_menu,
+            show_pet_bubble,
+            hide_pet_bubble,
+            pet_session_state,
             open_settings,
             quit_app,
             retry_launch
@@ -1729,6 +1967,11 @@ pub fn run() {
             if let Err(error) = prepare_tray_menu(app.handle()) {
                 eprintln!("dsh-desktop: prepare tray menu failed: {error}");
             }
+            // 宠物的气泡同理：它在一次**点击**里打开，而那正是最不该等建 webview
+            // 的时候。
+            if let Err(error) = prepare_pet_bubble(app.handle()) {
+                eprintln!("dsh-desktop: prepare pet bubble failed: {error}");
+            }
 
             // 关闭主窗口时：若开启“关闭到托盘”，则隐藏而不是退出。
             if let Some(main) = app.get_window("main") {
@@ -1765,6 +2008,7 @@ pub fn run() {
 
             let handle = app.handle().clone();
             start_launch(handle, state, host, guard, bridge);
+            start_pet_state_watch(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())

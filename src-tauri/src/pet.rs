@@ -41,6 +41,18 @@ use tauri::{
 /// Window label. Also the key `get_webview_window` looks up.
 pub const PET_LABEL: &str = "pet";
 
+/// Whether the pet is currently on screen.
+///
+/// Mirrored as an atomic because the session-state poller asks this several
+/// times a second: reading the state file, or asking the window, on every tick
+/// would be real work for a question whose answer changes only on a toggle.
+static PET_VISIBLE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the pet window is currently shown.
+pub fn is_visible() -> bool {
+    PET_VISIBLE.load(Ordering::SeqCst)
+}
+
 /// Default footprint.
 ///
 /// Sized to the pet plus the room its animation needs, not to a round number:
@@ -254,6 +266,7 @@ pub fn show(app: &AppHandle) -> Result<(), String> {
     window
         .set_position(PhysicalPosition::new(x, y))
         .map_err(|error| format!("摆放宠物失败：{error}"))?;
+    PET_VISIBLE.store(true, Ordering::SeqCst);
     let mut next = state;
     next.enabled = true;
     let _ = save(&next);
@@ -266,6 +279,7 @@ pub fn hide(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(PET_LABEL) {
         let _ = window.hide();
     }
+    PET_VISIBLE.store(false, Ordering::SeqCst);
     let mut state = load();
     state.enabled = false;
     let _ = save(&state);

@@ -3,8 +3,9 @@ import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
 
 // Multi-page shell: index.html = main window chrome, splash.html = launch
-// animation, tray-menu.html / update-popup.html = the two small always-on-top
-// windows (see lib.rs for why the updater gets a window of its own).
+// animation, tray-menu.html / update-popup.html / pet.html / pet-bubble.html =
+// the small always-on-top windows (see lib.rs for why the updater and the pet
+// get windows of their own).
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
@@ -29,6 +30,7 @@ export default defineConfig({
         trayMenu: resolve(__dirname, "tray-menu.html"),
         updatePopup: resolve(__dirname, "update-popup.html"),
         pet: resolve(__dirname, "pet.html"),
+        petBubble: resolve(__dirname, "pet-bubble.html"),
       },
     },
   },
