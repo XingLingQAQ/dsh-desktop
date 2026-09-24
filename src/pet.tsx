@@ -96,6 +96,16 @@ function Pet() {
   // transparent always-on-top window that keeps waking up to flip a class is a
   // battery cost for no visible benefit.
   const reaction = useRef<number | null>(null);
+  /**
+   * Whether a `pet-queue` event has already been seen.
+   *
+   * The mount-time read of the queue and the event stream race: if a drop lands
+   * while the read is in flight, the read's older answer arrives second and
+   * overwrites the newer one, so the badge shows a count that is already wrong.
+   * Once an event has been seen, the event is the only source — it is strictly
+   * newer than anything a read started earlier can return.
+   */
+  const queueFromEvent = useRef(false);
 
   const mood: Mood = poking ? "happy" : moodOf(session);
 
@@ -126,6 +136,7 @@ function Pet() {
     const unQueue = listen<string>("pet-queue", (event) => {
       try {
         const parsed = JSON.parse(event.payload) as { count?: number };
+        queueFromEvent.current = true;
         setQueued(typeof parsed?.count === "number" ? parsed.count : 0);
       } catch {
         // Ignore: the badge keeps its last value.
@@ -143,8 +154,10 @@ function Pet() {
       }
     });
     // Read the queue once, in case files were dropped before this page loaded.
+    // Skipped if an event has already arrived, for the reason on `queueFromEvent`.
     void invoke<string>("pet_queue")
       .then((raw) => {
+        if (queueFromEvent.current) return;
         const parsed = JSON.parse(raw) as { count?: number };
         setQueued(typeof parsed?.count === "number" ? parsed.count : 0);
       })
@@ -199,34 +212,61 @@ function Pet() {
   }, []);
 
   /**
-   * Drag the window with the OS.
+   * Drag the window with the OS, or treat it as a click.
    *
-   * A plain click and a drag both start here, so the reaction fires on
-   * mouse-up only when the pointer barely moved — otherwise every drag would
-   * also poke the pet, which reads as the pet celebrating being moved.
+   * The drag is **not** started on mouse-down. `startDragging()` enters the
+   * window manager's modal move loop, which captures the mouse to the top-level
+   * window until the button comes up — and that release ends the loop without
+   * ever being routed to this webview. So a drag started on mouse-down swallows
+   * the `mouseup` that would have ended it, and anything waiting on that event
+   * never runs.
+   *
+   * That is not theoretical: opening the bubble used to hang off exactly that
+   * `mouseup`, so clicking the pet did nothing at all, and every test that
+   * appeared to prove otherwise was invoking the command directly instead of
+   * clicking.
+   *
+   * Waiting for the pointer to actually move fixes it at the source: a plain
+   * click never enters the OS loop, so its `mouseup` arrives normally.
    */
   const startDrag = useCallback((event: React.MouseEvent) => {
     if (event.button !== 0) return;
     const startX = event.clientX;
     const startY = event.clientY;
-    const onUp = (up: MouseEvent) => {
-      window.removeEventListener("mouseup", onUp);
-      const moved = Math.hypot(up.clientX - startX, up.clientY - startY);
-      // A click opens the bubble; a drag only moves the pet.
-      if (moved < 4) {
-        poke();
-        bubble();
-      }
+
+    // The listeners are torn down by whichever path wins, so a press cannot
+    // leave one behind — the previous version removed itself only from inside
+    // itself, which leaked one per lost mouseup.
+    const stop = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     };
-    window.addEventListener("mouseup", onUp);
-    // On Windows this resolves when the OS drag loop ends, which is the first
-    // moment the final position is known. The shell also saves once the window
-    // stops moving, so this is only about landing it sooner — if the promise
-    // resolves early instead, that path still stores the right value.
-    void getCurrentWindow()
-      .startDragging()
-      .then(() => invoke("pet_save_position"))
-      .catch(() => {});
+
+    function onMove(move: PointerEvent) {
+      if (Math.hypot(move.clientX - startX, move.clientY - startY) < 4) return;
+      // Past the threshold: this is a drag, and from here the OS owns the
+      // pointer. Nothing below needs the mouseup.
+      stop();
+      // On Windows this resolves when the OS drag loop ends, which is the first
+      // moment the final position is known. The shell also saves once the window
+      // stops moving, so this is only about landing it sooner — if the promise
+      // resolves early instead, that path still stores the right value.
+      void getCurrentWindow()
+        .startDragging()
+        .then(() => invoke("pet_save_position"))
+        .catch(() => {});
+    }
+
+    function onUp() {
+      stop();
+      poke();
+      bubble();
+    }
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }, [poke, bubble]);
 
   /**

@@ -19,11 +19,17 @@ use serde::{Deserialize, Serialize};
 
 /// How many files can wait at once.
 ///
-/// A cap rather than no limit: the queue is shown in a 268px-wide card, and a
-/// hundred entries is not a queue anyone reads. Dropping more than this is
-/// refused with a count rather than silently truncated, so the user knows why
-/// some of what they dragged did not appear.
-pub const MAX_QUEUE: usize = 20;
+/// **Deliberately equal to the host plugin's `MAX_PROMPT_FILES`.** They were 20
+/// and 10 for a while, which meant a queue of 11 or more could never be sent —
+/// every attempt came back "files must hold at most 10 paths" and the only way out
+/// was deleting files one at a time, with nothing saying so. A queue that can hold
+/// more than can be sent is a trap; matching the two limits makes a full queue
+/// always sendable.
+///
+/// Files beyond the cap are **not** queued. The badge shows what was accepted, so
+/// dropping thirty and seeing ten is at least visible — but it is not a message,
+/// and a refusal notice is the honest version of this if it ever matters.
+pub const MAX_QUEUE: usize = 10;
 
 /// One file waiting to be sent.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,18 +57,37 @@ fn state_path() -> PathBuf {
         .join("pet-files.json")
 }
 
-/// Read the persisted queue. A missing or unreadable file is an empty queue, not
-/// an error: this is a convenience, never something to fail over.
+/// Read the persisted queue.
+///
+/// A missing file is an empty queue, not an error: this is a convenience. A file
+/// that exists but will not parse is logged rather than passed over — it means a
+/// write was interrupted, and the user's queued files are gone.
 pub fn load() {
-    let files = fs::read_to_string(state_path())
-        .ok()
-        .and_then(|text| serde_json::from_str::<Vec<QueuedFile>>(&text).ok())
-        .unwrap_or_default();
+    let files = match fs::read_to_string(state_path()) {
+        Ok(text) => match serde_json::from_str::<Vec<QueuedFile>>(&text) {
+            Ok(files) => files,
+            Err(error) => {
+                eprintln!("dsh-desktop: pet-files.json 无法解析（{error}），队列按空处理");
+                Vec::new()
+            }
+        },
+        Err(_) => Vec::new(),
+    };
     // Drop entries whose file has since been moved or deleted. Keeping them would
     // mean a queue that fails to send with a message about a file the user can no
     // longer see anywhere.
-    let alive: Vec<QueuedFile> = files.into_iter().filter(|f| fs::metadata(&f.path).is_ok()).collect();
-    *QUEUE.lock().unwrap() = alive;
+    let alive: Vec<QueuedFile> =
+        files.into_iter().filter(|f| fs::metadata(&f.path).is_ok()).collect();
+    let dropped = alive.len();
+    {
+        let mut queue = QUEUE.lock().unwrap();
+        *queue = alive;
+        // Save the filtered list, so dead rows do not sit on disk until the next
+        // unrelated mutation happens to rewrite the file.
+        if dropped > 0 {
+            save(&queue);
+        }
+    }
 }
 
 fn save(files: &[QueuedFile]) {
@@ -70,8 +95,12 @@ fn save(files: &[QueuedFile]) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(text) = serde_json::to_string_pretty(files) {
-        let _ = fs::write(path, text);
+    let Ok(text) = serde_json::to_string_pretty(files) else { return };
+    // Temp + rename, for the same reason as the pet's own state: an interrupted
+    // write must leave the previous file rather than half of a new one.
+    let tmp = path.with_extension("json.tmp");
+    if fs::write(&tmp, text).is_ok() {
+        let _ = fs::rename(&tmp, &path);
     }
 }
 
@@ -139,10 +168,16 @@ pub fn clear() -> QueueView {
     QueueView { count: 0, files: Vec::new() }
 }
 
-/// The paths currently queued, for a send.
+/// Remove exactly these paths, leaving anything else alone.
 ///
-/// Does not clear: the send can still be refused by the host, and emptying the
-/// queue before knowing that would lose the user's files to an error message.
-pub fn paths() -> Vec<String> {
-    QUEUE.lock().unwrap().iter().map(|f| f.path.clone()).collect()
+/// What a successful send uses, rather than [`clear`]: a file dropped on the pet
+/// *while* the previous prompt was uploading is not part of that send, and
+/// emptying the queue would discard it silently. The user would have watched the
+/// badge show it and then vanish, and would reasonably conclude it had been
+/// attached.
+pub fn remove_paths(paths: &[String]) -> QueueView {
+    let mut queue = QUEUE.lock().unwrap();
+    queue.retain(|f| !paths.iter().any(|p| p == &f.path));
+    save(&queue);
+    QueueView { count: queue.len(), files: queue.clone() }
 }

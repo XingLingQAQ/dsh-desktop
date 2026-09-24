@@ -32,8 +32,10 @@ pub struct HostProcess {
     /// process dies is the entire mechanism. Stored as `isize` rather than a
     /// handle type because raw pointers are not `Send` and this struct is shared
     /// across threads.
+    ///
+    /// Underscored because nothing ever reads it — its whole purpose is to exist.
     #[cfg(windows)]
-    job: Option<isize>,
+    _job: Option<isize>,
 }
 
 /// Put a spawned child in a job that kills it when this process dies.
@@ -183,7 +185,7 @@ impl HostProcess {
             events: rx,
             owned: true,
             #[cfg(windows)]
-            job,
+            _job: job,
         })
     }
 
@@ -320,16 +322,27 @@ pub fn probe_existing(port: u16) -> bool {
 /// A plugin route is not behind the host's token (only the app shell is), so the
 /// URL here is the bare origin plus the path.
 pub fn http_get_body(url: &str) -> Option<String> {
-    http_request("GET", url, None)
+    http_request("GET", url, None, QUICK_TIMEOUT)
 }
 
 /// POST a JSON body to a loopback URL and return the response body.
 ///
-/// Same minimal transport as the GET, plus a body and the headers it needs. Used
-/// by the pet's bubble to send a prompt and to switch the session it reports on.
-pub fn http_post_json(url: &str, body: &str) -> Option<String> {
-    http_request("POST", url, Some(body))
+/// `timeout` is per phase — connect, write, and the wait for the first byte — and
+/// the caller chooses it, because these routes are not alike. Sending a prompt
+/// uploads files and may resume a cold session before it answers, which takes far
+/// longer than reading a status document. One shared value cannot serve both: long
+/// enough for an upload makes the poll sluggish, and short enough for the poll
+/// turns a prompt that *was* delivered into a reported failure — the worse
+/// mistake of the two, because the user then sends it again.
+pub fn http_post_json(url: &str, body: &str, timeout: Duration) -> Option<String> {
+    http_request("POST", url, Some(body), timeout)
 }
+
+/// For the state poll, which runs twice a second and must fail fast.
+pub const QUICK_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// For anything with a person waiting on the other end.
+pub const PATIENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One minimal HTTP/1.0 exchange against loopback.
 ///
@@ -337,7 +350,7 @@ pub fn http_post_json(url: &str, body: &str) -> Option<String> {
 /// there is no framing to parse. Only the status line and the body are used —
 /// the headers are skipped, because every caller here wants JSON and nothing
 /// else, and a caller that needs a header would be better served by a real client.
-fn http_request(method: &str, url: &str, body: Option<&str>) -> Option<String> {
+fn http_request(method: &str, url: &str, body: Option<&str>, timeout: Duration) -> Option<String> {
     let parsed = url.strip_prefix("http://")?;
     let (host, rest) = parsed.split_once(':')?;
     let (port_part, path) = match rest.split_once('/') {
@@ -346,9 +359,9 @@ fn http_request(method: &str, url: &str, body: Option<&str>) -> Option<String> {
     };
     let port: u16 = port_part.parse().ok()?;
     let addr: std::net::SocketAddr = format!("{host}:{port}").parse().ok()?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
 
     let mut request = format!("{method} {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n");
     if let Some(body) = body {

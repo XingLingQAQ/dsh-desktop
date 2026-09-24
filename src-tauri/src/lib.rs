@@ -426,11 +426,11 @@ fn origin_of(url: &str) -> Option<String> {
 fn start_pet_state_watch(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last = String::new();
-        // The last turn end this loop has already reacted to. `None` means it has
-        // not seen one yet, which is what stops the very first poll — which reads
-        // whatever the previous run left behind — from announcing a turn that
-        // finished before the pet existed.
-        let mut last_end_at: Option<u64> = None;
+        // The last turn end this loop has already reacted to, as
+        // `(session id, ended at)`. `None` means none seen yet, which is what
+        // stops the very first poll — which reads whatever the previous run left
+        // behind — from announcing a turn that finished before the pet existed.
+        let mut last_end: Option<(String, u64)> = None;
         loop {
             std::thread::sleep(PET_STATE_INTERVAL);
             if !pet::is_visible() {
@@ -456,11 +456,24 @@ fn start_pet_state_watch(app: tauri::AppHandle) {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
                 let end = value.get("lastEnd");
                 let at = end.and_then(|e| e.get("at")).and_then(|a| a.as_u64());
+                let session = value
+                    .get("sessionId")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 if let Some(at) = at {
-                    let first = last_end_at.is_none();
-                    if last_end_at != Some(at) {
-                        last_end_at = Some(at);
-                        if !first && !main_window_visible(&app) {
+                    // Keyed on the session as well as the time. `lastEnd` describes
+                    // whichever session is current, so switching sessions swaps in
+                    // a *different* session's end time — and comparing times alone
+                    // would read that as a turn that just finished, raising a badge
+                    // for something that ended twenty minutes ago in a
+                    // conversation the user has only just looked at.
+                    let same_session = last_end.as_ref().is_some_and(|(id, _)| id == &session);
+                    let advanced = last_end.as_ref().is_none_or(|(_, prev)| at > *prev);
+                    let first = last_end.is_none();
+                    if !same_session || advanced {
+                        last_end = Some((session, at));
+                        if !first && same_session && !main_window_visible(&app) {
                             let kind = end
                                 .and_then(|e| e.get("kind"))
                                 .and_then(|k| k.as_str())
@@ -607,21 +620,30 @@ fn hide_pet_bubble(app: tauri::AppHandle) {
 
 /// The pet bubble's view of every session, straight from the host.
 ///
+/// The pet bubble's view of every session, straight from the host.
+///
 /// Returned as the host's own JSON string rather than a typed struct: the shape
 /// is the plugin's, and mirroring it in Rust would be a second definition to keep
 /// in step for no benefit — the only consumer is the bubble, which parses it.
+///
+/// `async` on purpose. A plain `#[tauri::command]` runs its body on the UI thread,
+/// and this body does blocking socket I/O; a slow host would freeze the window
+/// paint, the tray menu and the pet's own drag for as long as the timeout. The
+/// bubble calls this on mount and on every session change, so it is not a rare
+/// path.
 #[tauri::command]
-fn pet_sessions(app: tauri::AppHandle) -> Result<String, String> {
+async fn pet_sessions(app: tauri::AppHandle) -> Result<String, String> {
     let url = format!("{}/dsh-desktop-pet/sessions", pet_host_origin(&app)?);
     host::http_get_body(&url).ok_or_else(|| "取不到会话列表".to_string())
 }
 
 /// Point the pet at one session.
 #[tauri::command]
-fn pet_select_session(app: tauri::AppHandle, session_id: String) -> Result<String, String> {
+async fn pet_select_session(app: tauri::AppHandle, session_id: String) -> Result<String, String> {
     let url = format!("{}/dsh-desktop-pet/select", pet_host_origin(&app)?);
     let body = json!({ "sessionId": session_id }).to_string();
-    let answer = host::http_post_json(&url, &body).ok_or_else(|| "切换会话失败".to_string())?;
+    let answer = host::http_post_json(&url, &body, host::PATIENT_TIMEOUT)
+        .ok_or_else(|| "切换会话失败".to_string())?;
     // The command returns the new current id, or null when the host refused. The
     // bubble applies it immediately so the title answers the click instead of
     // waiting a poll interval.
@@ -695,8 +717,12 @@ fn pet_clear_files(app: tauri::AppHandle) -> usize {
 /// parts. The queue is emptied **only** on acceptance: a refusal usually has a
 /// fixable cause, and clearing first would throw the user's files away in
 /// exchange for an error message.
+/// `async` for the same reason as [`pet_sessions`], and it matters more here: this
+/// one uploads files, so the host may legitimately take seconds to answer. On the
+/// UI thread that is a frozen shell, and with a short timeout it is a prompt that
+/// was actually delivered reported as a failure.
 #[tauri::command]
-fn pet_send_prompt(
+async fn pet_send_prompt(
     app: tauri::AppHandle,
     session_id: String,
     text: String,
@@ -705,14 +731,16 @@ fn pet_send_prompt(
     let files = files.unwrap_or_default();
     let url = format!("{}/dsh-desktop-pet/prompt", pet_host_origin(&app)?);
     let body = json!({ "sessionId": session_id, "text": text, "files": files }).to_string();
-    let answer =
-        host::http_post_json(&url, &body).ok_or_else(|| "发不出去：宿主没有响应".to_string())?;
+    let answer = host::http_post_json(&url, &body, host::PATIENT_TIMEOUT)
+        .ok_or_else(|| "发不出去：宿主没有响应".to_string())?;
     let accepted = serde_json::from_str::<serde_json::Value>(&answer)
         .ok()
         .and_then(|value| value.get("ok").and_then(|ok| ok.as_bool()))
         == Some(true);
     if accepted && !files.is_empty() {
-        let view = pet_files::clear();
+        // Exactly what was sent, not the whole queue: a file dropped while this
+        // request was in flight is not part of it and must survive.
+        let view = pet_files::remove_paths(&files);
         emit_queue(&app, &view);
     }
     Ok(answer)
@@ -1830,22 +1858,30 @@ fn start_launch(
 /// Too Large` before a line of it runs. Measured here: **69 cookies, ~15.6 KB**,
 /// and a page that would not load at all.
 ///
-/// Only this launch's cookie is kept. Every cookie in this webview is one of
-/// these — 69 of 69 when this was written — so there is nothing else to preserve,
-/// and keeping the current one matters because the page's own API calls rely on it.
+/// **Every** `dsh-auth-*` cookie is deleted, including this launch's, because
+/// there is no way to tell them apart by name. The host names the cookie after a
+/// hash of the request authority — `dsh-auth-<base64url(sha256("127.0.0.1:<port>"))>`
+/// — while the `?token=` in the readiness URL is a separate random used only for
+/// the query exchange, so a name built from the token never matches anything. An
+/// earlier version "kept" that name and therefore deleted the live cookie too,
+/// which happened to be harmless only because of when it ran.
 ///
-/// Must run **before** the content webview makes its first request, and on a
-/// thread that is not a synchronous command or an event handler: Tauri documents
-/// these cookie calls as deadlocking in those contexts on Windows. The caller
-/// joins the thread rather than firing and forgetting, because the request that
-/// fails is the very next one.
-fn prune_stale_auth_cookies(window: &WebviewWindow, origin: &str, keep_token: &str) -> usize {
+/// So the ordering is the whole safety property, and it is enforced rather than
+/// assumed: [`CONTENT_ATTACHED`] records that the page has already authenticated,
+/// and the prune is skipped once it has. Without that, a retry that re-enters
+/// `finish_launch` after the content webview is up would delete the running
+/// session's cookie and every `/api` call from the page would start returning 401.
+///
+/// Must run on a thread that is not a synchronous command or an event handler:
+/// Tauri documents these cookie calls as deadlocking in those contexts on Windows.
+/// The caller joins the thread rather than firing and forgetting, because the
+/// request that fails is the very next one.
+fn prune_stale_auth_cookies(window: &WebviewWindow, origin: &str) -> usize {
     let Ok(url) = Url::parse(origin) else { return 0 };
     let Ok(cookies) = window.cookies_for_url(url) else { return 0 };
-    let keep = format!("dsh-auth-{keep_token}");
     let mut removed = 0usize;
     for cookie in cookies {
-        if !cookie.name().starts_with("dsh-auth-") || cookie.name() == keep {
+        if !cookie.name().starts_with("dsh-auth-") {
             continue;
         }
         if window.delete_cookie(cookie).is_ok() {
@@ -1855,16 +1891,10 @@ fn prune_stale_auth_cookies(window: &WebviewWindow, origin: &str, keep_token: &s
     removed
 }
 
-/// The `token` query value from the host's readiness URL, if present.
-fn token_of(url: &str) -> Option<&str> {
-    let rest = url.split_once("token=")?.1;
-    let token = rest.split(['&', '#']).next()?;
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
-}
+/// Whether the DSH page has been attached, and has therefore already
+/// authenticated. Set once; it is what keeps the cookie prune from running too
+/// late. See [`prune_stale_auth_cookies`].
+static CONTENT_ATTACHED: AtomicBool = AtomicBool::new(false);
 
 fn check_exited(process: &mut HostProcess) -> Option<String> {
     if process.is_alive() {
@@ -1921,13 +1951,16 @@ fn finish_launch(handle: &tauri::AppHandle, state: &SharedState, url: &str, brid
     // 4. 立即挂载 DSH（子控制器在可见窗口上初始化）
     //
     // 挂载之前先清掉历史登录 cookie，而且要等它做完：会撞上 431 的正是子
-    // webview 的第一个请求，清理晚一步就没有意义。见 prune_stale_auth_cookies。
-    if let Some(token) = token_of(url) {
+    // webview 的第一个请求，清理晚一步就没有意义。
+    //
+    // 只在**页面还没认证过**的时候清：清的是全部 dsh-auth-*（名字里认不出哪个是
+    // 本次的，见 prune_stale_auth_cookies），所以一旦页面已经用上了自己的 cookie，
+    // 再清就会把它一起删掉。重试启动会重新走到这里。
+    if !CONTENT_ATTACHED.load(Ordering::SeqCst) {
         if let Some(main_webview) = handle.get_webview_window("main") {
             let origin = origin_of(url).unwrap_or_else(|| url.to_string());
-            let token = token.to_string();
             let removed = std::thread::spawn(move || {
-                prune_stale_auth_cookies(&main_webview, &origin, &token)
+                prune_stale_auth_cookies(&main_webview, &origin)
             })
             .join()
             .unwrap_or(0);
@@ -1937,8 +1970,11 @@ fn finish_launch(handle: &tauri::AppHandle, state: &SharedState, url: &str, brid
         }
     }
     if let Ok(parsed) = url.parse::<Url>() {
-        if let Err(error) = attach_content_webview(handle, parsed, bridge) {
-            eprintln!("dsh-desktop: attach content webview failed: {error}");
+        match attach_content_webview(handle, parsed, bridge) {
+            // From here the page will authenticate and mint its own cookie, so the
+            // prune must not run again. See `prune_stale_auth_cookies`.
+            Ok(()) => CONTENT_ATTACHED.store(true, Ordering::SeqCst),
+            Err(error) => eprintln!("dsh-desktop: attach content webview failed: {error}"),
         }
     }
     // 5. 兜底恢复一次

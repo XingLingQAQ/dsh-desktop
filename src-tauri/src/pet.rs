@@ -123,13 +123,26 @@ fn state_path() -> PathBuf {
         .join("pet.json")
 }
 
-/// Read the saved pet state. A missing or unreadable file is the default, not an
-/// error: the pet's position is a convenience, never something to fail over.
+/// Read the saved pet state.
+///
+/// A missing file is the default, not an error: the pet's position is a
+/// convenience, never something to fail over. A file that *exists* but will not
+/// parse is different — that is a truncated write, and silently taking the
+/// default would reset `enabled` too, which does not merely move the pet: it turns
+/// off the reason closing the main window keeps the app alive. So it is logged.
 pub fn load() -> PetState {
-    fs::read_to_string(state_path())
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    let Ok(text) = fs::read_to_string(state_path()) else {
+        return PetState::default();
+    };
+    match serde_json::from_str(&text) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!(
+                "dsh-desktop: pet.json 无法解析（{error}），按默认值处理；宠物位置和开关会重置"
+            );
+            PetState::default()
+        }
+    }
 }
 
 pub fn save(state: &PetState) -> std::io::Result<()> {
@@ -137,7 +150,14 @@ pub fn save(state: &PetState) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serde_json::to_string_pretty(state).map_err(std::io::Error::other)?)
+    let text = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
+    // Write beside the target and rename over it, so a write that is interrupted
+    // — and this process is force-killed routinely, which is what the whole
+    // kill-on-close job is about — leaves the previous file intact instead of a
+    // half-written one. `rename` is atomic on the same volume.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text)?;
+    fs::rename(&tmp, &path)
 }
 
 /// Create the pet window if it does not exist yet, hidden.
