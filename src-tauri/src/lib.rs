@@ -447,7 +447,7 @@ fn start_pet_state_watch(app: tauri::AppHandle) {
             };
             let Some(origin) = url.as_deref().and_then(origin_of) else { continue };
             let target = format!("{origin}/dsh-desktop-pet/state");
-            let Some(body) = host::http_get_body(&target) else { continue };
+            let Some(body) = host::http_get_body(&target, host::QUICK_TIMEOUT) else { continue };
             if body != last {
                 last = body.clone();
                 *LAST_PET_STATE.lock().unwrap() = Some(body.clone());
@@ -619,6 +619,18 @@ fn show_pet_bubble(app: tauri::AppHandle) {
     let _ = bubble.show();
     // No `set_focus`: the bubble is informational, and stealing focus from
     // whatever the user is typing in would be a rude way to answer a click.
+    //
+    // Tell the page it is on screen, as the update popup is told. The window is
+    // hidden rather than unmounted between opens, so this is the only moment that
+    // means "the user just opened it" — the cue to re-read a session list whose
+    // mount read may have landed before the host was up. The page cannot see it
+    // for itself: measured, a hidden Tauri window keeps reporting `visible` and
+    // never fires `visibilitychange`.
+    let _ = app.emit_to(
+        tauri::EventTarget::webview_window("pet-bubble"),
+        "pet-bubble-shown",
+        (),
+    );
 }
 
 /// Close the pet's bubble.
@@ -629,8 +641,6 @@ fn hide_pet_bubble(app: tauri::AppHandle) {
     }
 }
 
-/// The pet bubble's view of every session, straight from the host.
-///
 /// The pet bubble's view of every session, straight from the host.
 ///
 /// Returned as the host's own JSON string rather than a typed struct: the shape
@@ -645,7 +655,7 @@ fn hide_pet_bubble(app: tauri::AppHandle) {
 #[tauri::command]
 async fn pet_sessions(app: tauri::AppHandle) -> Result<String, String> {
     let url = format!("{}/dsh-desktop-pet/sessions", pet_host_origin(&app)?);
-    host::http_get_body(&url).ok_or_else(|| "取不到会话列表".to_string())
+    host::http_get_body(&url, host::PATIENT_TIMEOUT).ok_or_else(|| "取不到会话列表".to_string())
 }
 
 /// Point the pet at one session.

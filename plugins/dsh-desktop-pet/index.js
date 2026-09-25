@@ -44,6 +44,7 @@ import { randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, isAbsolute } from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 export const name = 'dsh-desktop-pet'
 
@@ -76,6 +77,17 @@ const CORPUS_TTL_MS = 3_000
  * sessions nobody is about to pick.
  */
 const MAX_SESSIONS = 30
+
+/**
+ * How long one `/sessions` answer waits for a title fold before going without.
+ *
+ * Folding a title reads the session's whole event log. Measured on this
+ * machine, one pass over a 19-session corpus took 80 seconds, so the picker
+ * cannot wait for it: an answer that holds the shell's request open that long
+ * reads as the host being down. Long enough for a fold that is nearly done to
+ * land in this answer; a slower one fills the rows on a later request.
+ */
+const TITLE_WAIT_MS = 500
 
 /**
  * Ceiling on a request body, matching the other desktop plugin routes.
@@ -181,6 +193,12 @@ export function apply(ctx) {
    * cannot serve each other's sessions.
    */
   const corpus = { at: 0, records: null, inFlight: null }
+  /**
+   * Titles folded out of dormant sessions' logs, by session id, and the fold in
+   * flight. A session whose log has no title is remembered as null, so it is not
+   * read again either. See {@link fillTitles}.
+   */
+  const titles = { byId: new Map(), inFlight: null }
 
   /**
    * The view for one session, created on first mention.
@@ -300,6 +318,7 @@ export function apply(ctx) {
         setPinned: (id) => { pinned = id },
         diagnostics: () => ({ eventCount }),
         corpus,
+        titles,
         // `titleOf` closes over the title service resolved at load, so the
         // picker borrows this instance's helper rather than looking it up again.
         titleOf,
@@ -322,7 +341,7 @@ export function apply(ctx) {
  * @param {import('node:http').IncomingMessage} req - the request.
  * @param {import('node:http').ServerResponse} res - the response.
  * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context, for the services only some routes need.
- * @param {{sessions: Map<string, object>, current: () => string | null, diagnostics: () => object, corpus: object, titleOf: (session: object) => string | null}} store - the live state.
+ * @param {{sessions: Map<string, object>, current: () => string | null, diagnostics: () => object, corpus: object, titles: object, titleOf: (session: object) => string | null}} store - the live state.
  * @returns {Promise<void>} resolved once the answer is written.
  */
 async function serve(req, res, ctx, store) {
@@ -461,32 +480,75 @@ async function sessionList(store, ctx) {
     // show it selected, or it would contradict `/state`.
     rows.set(current, rowFor(current, null, liveSessions.has(current)))
   }
-  // The corpus listing carries headers but no titles, so a dormant session —
-  // one this run has seen no `session/title` event for — would render as
-  // "未命名会话". Its title is still in the log, and the query service folds it
-  // back out for a batch of ids at a time.
-  const query = service(ctx, 'sessionQuery')
-  const untitled = [...rows.values()].filter((row) => row.title === null).map((row) => row.id)
-  if (untitled.length > 0 && query !== null && typeof query.readTitleSnapshots === 'function') {
-    try {
-      for (const result of await query.readTitleSnapshots(untitled)) {
-        const folded = result?.status === 'fulfilled' ? result.value?.title?.title : null
-        if (typeof folded === 'string' && folded !== '') {
-          const row = rows.get(result.sessionId)
-          if (row !== undefined) row.title = folded
-        }
-      }
-    } catch {
-      // A title-fold failure leaves the untitled rows as they were — a missing
-      // title is a worse picker, not a broken one.
-    }
-  }
   const sessions = [...rows.values()]
     // Newest first, by the same timestamp each row reports. Ids break ties so
     // that two sessions touched in the same millisecond keep a stable order.
     .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))
     .slice(0, MAX_SESSIONS)
+  // After the slice: a fold costs a whole log read per session, so only the
+  // rows the picker will actually show are worth one.
+  await fillTitles(sessions, ctx, store.titles)
   return { current, sessions }
+}
+
+/**
+ * Fill untitled picker rows from titles folded out of the session logs.
+ *
+ * The corpus listing carries headers but no titles, so a dormant session — one
+ * this run has seen no `session/title` event for — would otherwise render as
+ * "未命名会话". Its title is still in its log, but `readTitleSnapshots` reads the
+ * *whole* log to find it. The first version of this called it inline, for every
+ * untitled row, on every request, and the bubble re-reads this route whenever it
+ * has no list yet: the route took 80 seconds, the shell timed out at 1.5, the
+ * bubble asked again, and the host ended up running dozens of full-corpus reads
+ * at once. So a session is folded at most once, one fold runs at a time, and an
+ * answer waits for it only {@link TITLE_WAIT_MS}.
+ * @param {object[]} rows - the rows about to be returned, filled in place.
+ * @param {import('@deepseek-ai/cordis').Context} ctx - the plugin context.
+ * @param {{byId: Map<string, string | null>, inFlight: Promise<void> | null}} cache - the fold cache.
+ * @returns {Promise<void>} resolved once the rows hold every title known now.
+ */
+async function fillTitles(rows, ctx, cache) {
+  const missing = rows.filter((row) => row.title === null && !cache.byId.has(row.id)).map((row) => row.id)
+  if (missing.length > 0 && cache.inFlight === null) {
+    const query = service(ctx, 'sessionQuery')
+    if (query !== null && typeof query.readTitleSnapshots === 'function') {
+      const pending = foldTitles(query, missing, cache).finally(() => {
+        if (cache.inFlight === pending) cache.inFlight = null
+      })
+      cache.inFlight = pending
+    }
+  }
+  if (cache.inFlight !== null) await Promise.race([cache.inFlight, sleep(TITLE_WAIT_MS)])
+  for (const row of rows) {
+    if (row.title === null) row.title = cache.byId.get(row.id) ?? null
+  }
+}
+
+/**
+ * Fold the titles of some sessions into the cache.
+ *
+ * Every requested id is recorded, a failure included, as null: a title is a
+ * nicer picker and not a working one, and a failure retried per request is the
+ * same full-log read the cache exists to avoid.
+ * @param {object} query - the host `sessionQuery` service.
+ * @param {string[]} ids - the session ids to fold.
+ * @param {{byId: Map<string, string | null>}} cache - the fold cache.
+ * @returns {Promise<void>} resolved once every id is recorded.
+ */
+async function foldTitles(query, ids, cache) {
+  try {
+    for (const result of await query.readTitleSnapshots(ids)) {
+      if (typeof result?.sessionId !== 'string') continue
+      const folded = result.status === 'fulfilled' ? result.value?.title?.title : null
+      cache.byId.set(result.sessionId, typeof folded === 'string' && folded !== '' ? folded : null)
+    }
+  } catch {
+    // Recorded below like any other miss.
+  }
+  for (const id of ids) {
+    if (!cache.byId.has(id)) cache.byId.set(id, null)
+  }
 }
 
 /**
@@ -764,6 +826,13 @@ function readJson(req) {
 
 /**
  * The pet's current view, with the linger windows already applied.
+ *
+ * Deliberately carries no clock. The shell forwards this document only when it
+ * differs from the last one, and a timestamp in it made every 600ms poll a
+ * difference: both pet windows re-rendered on every poll, and the bubble —
+ * which re-reads the session list on state while it has none — turned that into
+ * a request per poll. A lingering face still settles on time, because
+ * `activityAt` changes the document when it does.
  * @param {{sessions: Map<string, object>, current: () => string | null}} store - the live state.
  * @returns {object} a JSON-safe snapshot.
  */
@@ -772,7 +841,7 @@ function snapshot(store) {
   const id = store.current()
   const view = id === null ? undefined : store.sessions.get(id)
   if (view === undefined) {
-    return { activity: 'idle', sessionId: null, title: null, tool: null, turn: null, lastEnd: null, updatedAt: now }
+    return { activity: 'idle', sessionId: null, title: null, tool: null, turn: null, lastEnd: null }
   }
   return {
     activity: activityAt(view, now),
@@ -782,7 +851,6 @@ function snapshot(store) {
     turn: view.turn,
     lastEnd: view.lastEnd,
     sessionCount: store.sessions.size,
-    updatedAt: now,
   }
 }
 

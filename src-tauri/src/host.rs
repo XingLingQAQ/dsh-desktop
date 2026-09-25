@@ -330,8 +330,13 @@ pub fn probe_existing(port: u16) -> bool {
 ///
 /// A plugin route is not behind the host's token (only the app shell is), so the
 /// URL here is the bare origin plus the path.
-pub fn http_get_body(url: &str) -> Option<String> {
-    http_request("GET", url, None, QUICK_TIMEOUT)
+///
+/// The timeout is the caller's, as it is for [`http_post_json`]: the state poll
+/// wants [`QUICK_TIMEOUT`] so a slow host costs one interval, while the session
+/// list is fetched because someone opened the picker, and a corpus read that is
+/// merely slow should not read as a failure — so it gets [`PATIENT_TIMEOUT`].
+pub fn http_get_body(url: &str, timeout: Duration) -> Option<String> {
+    http_request("GET", url, None, timeout)
 }
 
 /// POST a JSON body to a loopback URL and return the response body.

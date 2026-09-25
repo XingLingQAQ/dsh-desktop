@@ -84,6 +84,16 @@ interface FileQueue {
  */
 const NO_FILES: QueuedFile[] = [];
 
+/**
+ * The least time between two unprompted re-reads of the session list.
+ *
+ * While the bubble has no list it re-reads on `pet-state`, and that event can
+ * arrive every poll during a turn. Each read is a request the host answers from
+ * its session corpus, so a retry path must not become a request per poll — that
+ * is how a slow route once turned into dozens of full-corpus reads at once.
+ */
+const LIST_RETRY_MS = 3_000;
+
 /** Parse a snapshot, or return null if it is not one. */
 function parse(raw: string | null | undefined): SessionState | null {
   if (raw === null || raw === undefined) return null;
@@ -354,6 +364,8 @@ function Bubble() {
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+  /** When the listener last re-read the list unprompted. See {@link LIST_RETRY_MS}. */
+  const lastListRetry = useRef(0);
 
   /**
    * Re-read the picker's list.
@@ -436,10 +448,15 @@ function Bubble() {
       const parsed = parse(event.payload);
       if (parsed !== null) {
         setState(parsed);
-        // The host just answered for the first time — if we still have no
-        // session list (the mount read failed before the host was up), get it
-        // now rather than waiting for a sessionId change that may never come.
-        if (sessionsRef.current === null) void loadSessions();
+        // State arriving means the host is up. If there is still no session
+        // list (the mount read failed before the host was), get it now rather
+        // than waiting for a sessionId change that may never come — but at most
+        // once per LIST_RETRY_MS, because this event can come every poll.
+        const now = Date.now();
+        if (sessionsRef.current === null && now - lastListRetry.current >= LIST_RETRY_MS) {
+          lastListRetry.current = now;
+          void loadSessions();
+        }
       }
     });
     // Fill in from the shell's cache before the first poll lands, so the card is
@@ -483,17 +500,18 @@ function Bubble() {
   // The bubble window is built at startup and only shown later, so the mount
   // read of the session list can land before the host is up — and `/state`
   // reports a null session until something happens, so the sessionId-change
-  // retry never fires either. Re-read whenever the window is shown again; a
-  // hidden Tauri window fires `visibilitychange` when it comes back.
+  // retry may never fire either. So every open re-reads both lists. The shell
+  // says when the window has been put on screen, the way it tells the update
+  // popup: the page cannot tell for itself, because a hidden Tauri window keeps
+  // reporting `visible` and never fires `visibilitychange` (measured).
   useEffect(() => {
-    const onVis = () => {
-      if (document.visibilityState === "visible") {
-        void loadSessions();
-        void loadQueue();
-      }
+    const un = listen("pet-bubble-shown", () => {
+      void loadSessions();
+      void loadQueue();
+    });
+    return () => {
+      un.then((fn) => fn());
     };
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
   }, [loadSessions, loadQueue]);
 
   // A menu closes on the same gestures as a native one: Escape, or a click
@@ -635,8 +653,20 @@ function Bubble() {
   }, [currentId, draft, queue, sending]);
 
   const { text, tone } = headline(state);
+  // Sessions listed but none current — a fresh start, before any session has
+  // moved. The picker is the way forward then, and the card must say so rather
+  // than claim there is nothing to send to while it lists thirty sessions.
+  const choosing = currentId === null && pickable;
+  // An untitled session that *is* current reads the way its row in the list
+  // does; "还没有会话" is only true when there is no session at all.
   const titleNode =
-    title === null || title === "" ? <span className="pet-bubble-muted">还没有会话</span> : title;
+    title === null || title === "" ? (
+      <span className="pet-bubble-muted">
+        {choosing ? "选一个会话" : currentId !== null ? "未命名会话" : "还没有会话"}
+      </span>
+    ) : (
+      title
+    );
   // The foot is one line with two jobs, and a staged queue takes it: what the
   // next send will carry is worth more than the turn counter, and it is the only
   // place the count and the total stay visible once the rows scroll. A refusal
@@ -647,9 +677,11 @@ function Bubble() {
     notice ??
     (files.length > 0
       ? queueLine
-      : currentId === null
-        ? "在应用里开一个会话，它就会跟上"
-        : `第 ${turn ?? "?"} 回合 · 点宠物关闭`);
+      : choosing
+        ? "点上面的标题选一个会话"
+        : currentId === null
+          ? "在应用里开一个会话，它就会跟上"
+          : `第 ${turn ?? "?"} 回合 · 点宠物关闭`);
 
   return (
     <div className="pet-bubble" data-tone={tone}>
@@ -786,7 +818,7 @@ function Bubble() {
           value={draft}
           // The placeholder carries the reason the composer is off: at this size
           // it is the only line of explanation that fits inside the field.
-          placeholder={currentId === null ? "没有可以发送的会话" : "发一句话…"}
+          placeholder={choosing ? "先选一个会话" : currentId === null ? "没有可以发送的会话" : "发一句话…"}
           disabled={currentId === null}
           // Read-only, not disabled, while a prompt is in flight: a disabled
           // field cannot hold focus, so the caret would be dropped by the very
