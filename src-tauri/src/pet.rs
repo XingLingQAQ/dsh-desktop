@@ -1,16 +1,36 @@
-//! The desktop pet: a transparent, always-on-top window that stays after the
-//! main window is closed.
+//! The desktop pet: an always-on-top window that stays after the main window is
+//! closed.
 //!
 //! Two things make this window unlike the other auxiliary windows in this shell:
 //!
-//!  * It is **transparent**, so the pet floats over the desktop instead of
-//!    sitting in a panel. This was measured on the target machine rather than
-//!    assumed — a probe window with an opaque half and a transparent half showed
-//!    the desktop through the transparent half, so no `SetWindowRgn` mask (the
-//!    trick the update popup uses) is needed here.
+//!  * It is **opaque**, with its rounded corners cut by a window region
+//!    (`SetWindowRgn`), and the page paints a card inside that region. This is
+//!    the same construction as the update popup, and it is here for the same
+//!    reason — see below.
 //!  * Its position is **persisted**, including which monitor it was on. A pet
 //!    that teleports back to the primary screen after a reboot is worse than one
 //!    that never moved.
+//!
+//! ## Why not transparency
+//!
+//! The first version was `transparent(true)`, so the pet's own pixels were the
+//! window's shape and it floated directly over the wallpaper. That looked better
+//! and it was verified at the time, but it is **not safe on this machine**: over
+//! a Remote Desktop session WebView2 falls back to software composition, where
+//! per-pixel window transparency is unreliable. What the user sees when it
+//! degrades is the pet sitting on an opaque **grey-white rectangle** — and
+//! because a layered window's moves desync the RDP client's bitmap cache, the
+//! places it was dragged across keep that grey-white **permanently**, until the
+//! whole screen is forced to repaint.
+//!
+//! The update popup had already been changed to opaque-plus-region for exactly
+//! this reason ("透明渲染在软件合成下不可靠"), so the answer was already in the
+//! codebase; the pet simply did not follow it. An opaque window is an ordinary
+//! window, and RDP repaints ordinary windows correctly.
+//!
+//! The cost is real and worth stating: the pet no longer floats free — it sits
+//! on a card. The card is designed to look intentional (see the `.pet-*` rules
+//! in `styles.css`) rather than like a panel the pet got stuck in.
 //!
 //! The window is created hidden at startup and shown on demand, because
 //! building a webview is the expensive part and the user may toggle the pet at
@@ -56,13 +76,20 @@ pub fn is_visible() -> bool {
 /// Default footprint.
 ///
 /// Sized to the pet plus the room its animation needs, not to a round number:
-/// this window does not click through, so every transparent pixel around the pet
-/// is a patch of desktop the user cannot click. The figure is 108×132 and hops
-/// 10px with sparkles reaching 18px above it, and its soft shadow spills a few
-/// pixels below — so the height is the figure plus room above *and* below, and
-/// the width is the figure plus its side margin.
+/// the window is opaque and does not click through, so every pixel of margin
+/// around the pet is desktop the user can neither see through nor click. The
+/// figure is 108×132 and hops 10px with sparkles reaching 18px above it, and its
+/// soft shadow spills a few pixels below — so the height is the figure plus room
+/// above *and* below, and the width is the figure plus its side margin.
 pub const PET_WIDTH: f64 = 132.0;
 pub const PET_HEIGHT: f64 = 168.0;
+
+/// Corner radius of the pet's card, in logical pixels.
+///
+/// Applied as a window region rather than a CSS `border-radius`: the region is
+/// what actually clips the window (and its child webview) to the rounded shape,
+/// so the corners show the desktop instead of the window's backing colour.
+pub const PET_RADIUS: f64 = 18.0;
 
 /// Keep at least this much of the pet on-screen when restoring a position, so a
 /// saved spot on a monitor that is no longer attached cannot hide it forever.
@@ -177,12 +204,35 @@ pub fn prepare(app: &AppHandle) -> Result<WebviewWindow, String> {
         .skip_taskbar(true)
         .resizable(false)
         .shadow(false)
-        // The whole point: the pet's own pixels are the window's shape.
-        .transparent(true)
+        // Opaque on purpose — see the module docs. The rounded shape comes from
+        // the window region applied below, not from per-pixel transparency.
+        .transparent(false)
         .visible(false)
         .build()
         .map_err(|error| format!("建立宠物窗口失败：{error}"))?;
+    // A window region is in window coordinates and does not follow a resize on
+    // its own, so it has to be re-cut whenever the size changes.
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Resized(_)) {
+            apply_card_region(&handle);
+        }
+    });
+    apply_card_region(app);
     Ok(window)
+}
+
+/// Clip the pet window to a rounded rectangle.
+///
+/// The region is what makes the card's corners show the desktop: an opaque
+/// window has no other way to be non-rectangular. Cut from the window's current
+/// size, which is why `show()` calls it again after sizing and showing — a
+/// window that has never been shown does not reliably report the size it will
+/// have.
+fn apply_card_region(app: &AppHandle) {
+    if let Some(frame) = app.get_window(PET_LABEL) {
+        crate::apply_rounded_region_r(&frame, PET_RADIUS);
+    }
 }
 
 /// The work area as a monitor rectangle, for the clamping path.
@@ -286,6 +336,10 @@ pub fn show(app: &AppHandle) -> Result<(), String> {
     window
         .set_position(PhysicalPosition::new(x, y))
         .map_err(|error| format!("摆放宠物失败：{error}"))?;
+    // Now that the window is on screen at its final size, cut the card's corners.
+    // Doing it here rather than only at build time matters because the window is
+    // built hidden: its size is not settled until it has been shown.
+    apply_card_region(app);
     PET_VISIBLE.store(true, Ordering::SeqCst);
     let mut next = state;
     next.enabled = true;

@@ -1759,19 +1759,43 @@ html.upd-window body {
 
 /* ============ 桌面宠物 ============
  *
- * 独立窗口（pet.html / src/pet.tsx），透明、置顶、无边框、跳过任务栏。
+ * 独立窗口（pet.html / src/pet.tsx），置顶、无边框、跳过任务栏、**不透明**。
  *
- * 这个窗口**必须透明**：宠物的"形状"就是它自己的像素，窗口矩形里除了宠物
- * 以外的部分要真的透出桌面。这一点是实测过的（不是照抄更新弹窗——那个用
- * SetWindowRgn 裁圆角，方式不同）。
+ * 这个窗口一开始是透明的——宠物的"形状"就是它自己的像素，窗口矩形里除了宠物
+ * 以外的部分真的透出桌面。那个版本在远程桌面下会坏掉：WebView2 在软件合成下
+ * 退回不透明底层，宠物就坐在一块**灰白矩形**上；而分层窗口的移动会让 RDP 客户
+ * 端的位图缓存错位，于是它被拖过的地方**永久**留下那块灰白，直到整屏被强制重
+ * 绘。更新弹窗早就因为同一个原因改成了"不透明 + 区域裁剪"（见 lib.rs），宠物
+ * 只是没跟上。
  *
- * 背景色的默认值是 DSH 浅色主题的真实色值，深色主题由注入脚本上报覆盖，和
- * 其它窗口走同一套 --ds-* 变量。
+ * 所以现在的构造是：窗口不透明，外缘圆角由 pet.rs 用 SetWindowRgn 裁出来，页面
+ * 在窗口里画一张**卡片**。代价是宠物不再浮在壁纸上，而是坐在一张牌上——所以卡
+ * 片按"像一张牌"来设计，而不是按"宠物被困在一个面板里"。
  */
+/* 窗口**不透明**（见 pet.rs 的模块注释）：卡片底色必须铺满整块客户区，留白会露
+   出 WebView2 的默认白底。圆角不在这里做——外缘由 SetWindowRgn 裁出来，这里的
+   border-radius 只是让下面那圈内亮边跟着圆。
+
+   配色是深靛蓝：宠物的蓝需要一块比它暗的底才有对比；上浅下深，才像一块被光打
+   到的牌，而不是一块色块。 */
 html.pet-window,
 html.pet-window body {
-  background: transparent;
+  background: linear-gradient(180deg, #333c6e 0%, #1e2440 55%, #141827 100%);
   overflow: hidden;
+}
+
+/* 贴着裁剪线内侧的一圈光，让卡片有厚度而不是一块平色。窗口区域已经把外缘裁成
+   圆角，所以这条边只要跟着圆角画；z-index 让它在宠物之上，边才不会被宠物压掉。 */
+html.pet-window body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  border-radius: 18px;
+  box-shadow:
+    inset 0 0 0 1px rgba(124, 147, 255, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  pointer-events: none;
+  z-index: 1;
 }
 
 .pet-root {
@@ -1780,7 +1804,7 @@ html.pet-window body {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  /* 整层透明：只有宠物本体画东西。 */
+  /* 卡片由 body 铺满，这一层保持透明：只有宠物本体画东西。 */
   background: transparent;
 
   /* 宠物**自己的调色板**，不跟主题走。
@@ -1788,7 +1812,8 @@ html.pet-window body {
    * 一开始这里用的是 --ds-brand，想法是"宠物跟着应用主题变色"。实测发现那是错
    * 的：DSH 的 brand-primary 是**主按钮**的颜色，深色主题下是近黑、浅色主题下
    * 是近白。而宠物住在桌面上，不是住在应用里——一只白色的宠物落在浅色壁纸上
-   * 就是隐形的。所以宠物用固定的角色配色，再靠下面那圈描边跟任意壁纸分开。 */
+   * 就是隐形的。所以宠物用固定的角色配色：它现在坐在深色卡片上，靠那圈亮色描
+   * 边跟卡片底色分开。 */
   --pet-hi: #7c93ff;
   --pet-body: #4e68f0;
   --pet-lo: #3a4fd0;
@@ -1799,9 +1824,9 @@ html.pet-window body {
 /* 拖动句柄 = 宠物本体。cursor 用 move 而不是 grab：这是一只可以被拎走的宠物，
    不是一块可拖动的面板。
 
-   本体铺满窗口，而不是居中留白：透明区域**依然会吃掉鼠标点击**（这个窗口不做
-   点击穿透），所以窗口每多留一圈空白，桌面上就多一块点不动的地方。窗口尺寸因
-   此按"宠物本身 + 跳跃所需的高度"来定，见 pet.rs 的 PET_WIDTH/PET_HEIGHT。 */
+   本体铺满卡片，而不是居中留白：窗口不做点击穿透，所以卡片每多留一圈空白，桌
+   面上就多一块点不动的地方。窗口尺寸因此按"宠物本身 + 跳跃所需的高度"来定，见
+   pet.rs 的 PET_WIDTH/PET_HEIGHT。 */
 .pet-body {
   position: relative;
   width: 100%;
@@ -2015,7 +2040,7 @@ html.pet-window body {
   width: 84px;
   height: 12px;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(0, 0, 0, 0.32);
   filter: blur(4px);
   transition: transform 0.3s ease, opacity 0.3s ease;
 }
@@ -2115,13 +2140,15 @@ html.pet-window body {
  * 宠物只有 132px 宽，而且透明窗口不做点击穿透——所以它是一个很小的落点。小落点
  * 更需要**明确承认**这一下，否则拖过去的感觉像是往空气里扔东西。
  *
- * 反馈只用一个虚线圈，不铺大色块：宠物本体是透明的，铺一块底色会把它变成一个
- * 面板，那就不是宠物了。
+ * 反馈只用一个虚线圈，不铺大色块：卡片已经有底色了，再铺一层只会让整张牌在拖
+ * 拽时变色，反而看不出"接住了"。
  */
 .pet-drop-ring {
   position: absolute;
-  inset: 6px 4px 4px 4px;
-  border-radius: 44px;
+  /* 贴着卡片内缘一圈：卡片外缘的圆角是 18px，这里跟着它画，读起来才像"这张牌
+     能接住东西"，而不是宠物身上套了个圈。 */
+  inset: 6px;
+  border-radius: 14px;
   border: 2px dashed var(--pet-hi);
   opacity: 0;
   transform: scale(0.92);
@@ -2138,7 +2165,8 @@ html.pet-window body {
 /* 待发送文件的角标。只在真的有文件时才渲染——没拖过文件的人看到的宠物一点没变。 */
 .pet-queue-badge {
   position: absolute;
-  right: 0;
+  /* 内缩 5px：卡片的圆角是 18px，角标贴到 0 会被裁掉一个缺口。 */
+  right: 5px;
   top: 22px;
   min-width: 18px;
   height: 18px;
@@ -2167,7 +2195,8 @@ html.pet-window body {
  */
 .pet-missed-badge {
   position: absolute;
-  left: 0;
+  /* 和文件角标对称内缩，理由同上。 */
+  left: 5px;
   top: 22px;
   width: 18px;
   height: 18px;
